@@ -1,7 +1,7 @@
-const User = require('../model/User');
-const jwt = require('jsonwebtoken');
+import User from '../model/User.js';
+import jwt from 'jsonwebtoken';
 
-const handleRefreshToken = async (req, res) => {
+export const handleRefreshToken = async (req, res) => {
 	const cookies = req.cookies;
 	if (!cookies?.jwt) return res.sendStatus(401);
 	const refreshToken = cookies.jwt;
@@ -26,5 +26,3 @@ const handleRefreshToken = async (req, res) => {
 		res.json({ roles, accessToken });
 	});
 };
-
-module.exports = { handleRefreshToken };

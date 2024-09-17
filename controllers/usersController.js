@@ -1,13 +1,13 @@
-const User = require('../model/User');
-const bcrypt = require('bcrypt');
+import User from '../model/User.js';
+import bcrypt from 'bcrypt';
 
-const getAllUsers = async (req, res) => {
+export const getAllUsers = async (req, res) => {
 	const users = await User.find();
 	if (!users) return res.status(204).json({ message: 'No users found' });
 	res.json(users);
 };
 
-const deleteUser = async (req, res) => {
+export const deleteUser = async (req, res) => {
 	const { id } = req.params; // Make sure you're pulling from params
 	if (!id) {
 		return res.status(400).json({ message: 'User ID required' });
@@ -20,7 +20,7 @@ const deleteUser = async (req, res) => {
 	res.json({ message: 'User deleted successfully' });
 };
 
-const updateUser = async (req, res) => {
+export const updateUser = async (req, res) => {
 	const { id } = req.params;
 	const { username, email, password } = req.body;
 
@@ -46,7 +46,7 @@ const updateUser = async (req, res) => {
 	}
 };
 
-const getUser = async (req, res) => {
+export const getUser = async (req, res) => {
 	if (!req?.params?.id)
 		return res.status(400).json({ message: 'User ID required' });
 	const user = await User.findOne({ _id: req.params.id }).exec();
@@ -56,11 +56,4 @@ const getUser = async (req, res) => {
 			.json({ message: `User ID ${req.params.id} not found` });
 	}
 	res.json(user);
-};
-
-module.exports = {
-	getAllUsers,
-	deleteUser,
-	updateUser,
-	getUser,
 };

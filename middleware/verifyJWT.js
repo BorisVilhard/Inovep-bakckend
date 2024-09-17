@@ -1,18 +1,28 @@
-const jwt = require('jsonwebtoken');
+// verifyJWT.js
+import jwt from 'jsonwebtoken';
 
 const verifyJWT = (req, res, next) => {
-	const token = req.cookies.jwt || req.headers.authorization.split(' ')[1];
-	if (!token) {
-		return res.sendStatus(401);
+	// Get the authorization header
+	const authHeader = req.headers['authorization'];
+
+	// Check if the header is not undefined and starts with 'Bearer'
+	if (!authHeader || !authHeader.startsWith('Bearer ')) {
+		return res.status(401).json({
+			message: 'Authorization header missing or improperly formatted',
+		});
 	}
 
-	jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decodedToken) => {
+	// Extract the token
+	const token = authHeader.split(' ')[1]; // This will handle properly formatted 'Bearer token'
+
+	// Verify the token
+	jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
 		if (err) {
-			return res.sendStatus(403);
+			return res.status(403).json({ message: 'Failed to authenticate token' });
 		}
-		req.user = decodedToken;
+		req.user = decoded; // Assuming the decoded token contains user info
 		next();
 	});
 };
 
-module.exports = verifyJWT;
+export default verifyJWT;

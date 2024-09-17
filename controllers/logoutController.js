@@ -1,26 +1,33 @@
-const User = require('../model/User');
+import User from '../model/User.js';
 
-const handleLogout = async (req, res) => {
+export const handleLogout = async (req, res) => {
 	// On client, also delete the accessToken
 
 	const cookies = req.cookies;
-	if (!cookies?.jwt) return res.sendStatus(204); //No content
+	if (!cookies?.jwt) return res.sendStatus(204); // No content
 	const refreshToken = cookies.jwt;
 
-	// Is refreshToken in db?
-	const foundUser = await User.findOne({ refreshToken }).exec();
-	if (!foundUser) {
+	try {
+		// Is refreshToken in db?
+		const foundUser = await User.findOne({ refreshToken }).exec();
+		if (!foundUser) {
+			res.clearCookie('jwt', {
+				httpOnly: true,
+				sameSite: 'None',
+				secure: true,
+			});
+			return res.sendStatus(204);
+		}
+
+		// Delete refreshToken in db
+		foundUser.refreshToken = '';
+		const result = await foundUser.save();
+		console.log(result);
+
 		res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
-		return res.sendStatus(204);
+		res.sendStatus(204);
+	} catch (error) {
+		console.error(error);
+		res.status(500).json({ message: 'Internal server error' });
 	}
-
-	// Delete refreshToken in db
-	foundUser.refreshToken = '';
-	const result = await foundUser.save();
-	console.log(result);
-
-	res.clearCookie('jwt', { httpOnly: true, sameSite: 'None', secure: true });
-	res.sendStatus(204);
 };
-
-module.exports = { handleLogout };
