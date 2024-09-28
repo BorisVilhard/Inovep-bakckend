@@ -20,8 +20,8 @@ import bodyParser from 'body-parser';
 import chatRoute from './routes/chat.js';
 import userRoutes from './routes/api/users.js';
 import documentProcessRoutes from './routes/documentProcess.js';
+import dataRoutes from './routes/api/data.js';
 
-// Obtain __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -29,31 +29,22 @@ const app = express();
 const PORT = process.env.PORT || 3500;
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-// Connect to MongoDB
+
 connectDB();
 
-// Custom middleware logger
 app.use(logger);
-// Handle options credentials check - before CORS!
-// and fetch cookies credentials requirement
+
 app.use(credentials);
 
-// Cross Origin Resource Sharing
 app.use(cors(corsOptions));
 
-// Built-in middleware to handle urlencoded form data
 app.use(express.urlencoded({ extended: false }));
 
-// Built-in middleware for JSON
 app.use(express.json());
 
-// Middleware for cookies
 app.use(cookieParser());
 
-// Serve static files
 app.use('/', express.static(path.join(__dirname, '/public')));
-
-// Routes
 
 app.use('/', rootRoutes);
 app.use('/register', registerRoutes);
@@ -62,13 +53,11 @@ app.use('/refresh', refreshRoutes);
 app.use('/logout', logoutRoutes);
 app.use('/documentProcess', documentProcessRoutes);
 
-// Use your upload route for /chat endpoint
 app.use('/chat', chatRoute);
 
 app.use(verifyJWT);
 app.use('/users', userRoutes);
 
-// Handle 404 errors
 app.all('*', (req, res) => {
 	res.status(404);
 	if (req.accepts('html')) {
@@ -80,10 +69,8 @@ app.all('*', (req, res) => {
 	}
 });
 
-// Error handling middleware
 app.use(errorHandler);
 
-// Start server after connecting to MongoDB
 mongoose.connection.once('open', () => {
 	console.log('Connected to MongoDB');
 	app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

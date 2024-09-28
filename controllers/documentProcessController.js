@@ -1,9 +1,7 @@
-// documentProcessController.js
-
 import { PdfReader } from 'pdfreader';
 import { format } from 'date-fns';
-import sharp from 'sharp'; // For image processing
-import tesseract from 'tesseract.js'; // For OCR
+import sharp from 'sharp';
+import tesseract from 'tesseract.js';
 import openpyxl from 'xlsx';
 import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
