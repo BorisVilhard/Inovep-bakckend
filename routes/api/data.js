@@ -1,26 +1,27 @@
-// routes/dataRoutes.js
-
 import express from 'express';
 import {
-	getAllData,
-	getData,
-	createData,
-	updateData,
+	getAllDashboards,
+	getDashboardById,
+	createDashboard,
+	updateDashboard,
 	deleteDashboard,
-	deleteCategory,
-	deleteChart,
+	verifyUserOwnership,
 } from '../../controllers/dataController.js';
+import verifyJWT from '../../middleware/verifyJWT.js';
 
 const router = express.Router();
 
-router.get('/', getAllData);
-router.get('/:id', getData);
-router.post('/', createData);
-router.put('/:id', updateData);
+router.use(verifyJWT);
 
-// Delete operations
-router.delete('/:id', deleteDashboard); // Delete a dashboard
-router.delete('/:id/category/:categoryName', deleteCategory); // Delete a category
-router.delete('/:id/category/:categoryName/chart/:chartId', deleteChart); // Delete a chart
+router
+	.route('/users/:id/dashboard')
+	.get(verifyUserOwnership, getAllDashboards)
+	.post(verifyUserOwnership, createDashboard);
+
+router
+	.route('/users/:id/dashboard/:dashboardId')
+	.get(verifyUserOwnership, getDashboardById)
+	.put(verifyUserOwnership, updateDashboard)
+	.delete(verifyUserOwnership, deleteDashboard);
 
 export default router;

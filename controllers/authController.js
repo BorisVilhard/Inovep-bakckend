@@ -1,3 +1,4 @@
+// controllers/authController.js
 import User from '../model/User.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
@@ -18,9 +19,15 @@ export const handleLogin = async (req, res) => {
 		const match = await bcrypt.compare(pwd, foundUser.password);
 		if (match) {
 			const accessToken = jwt.sign(
-				{ username: foundUser.username, email: foundUser.email },
+				{
+					UserInfo: {
+						id: foundUser._id,
+						username: foundUser.username,
+						email: foundUser.email,
+					},
+				},
 				process.env.ACCESS_TOKEN_SECRET,
-				{ expiresIn: '10m' }
+				{ expiresIn: '1d' }
 			);
 
 			const refreshToken = jwt.sign(

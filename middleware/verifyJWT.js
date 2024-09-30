@@ -2,25 +2,22 @@
 import jwt from 'jsonwebtoken';
 
 const verifyJWT = (req, res, next) => {
-	// Get the authorization header
-	const authHeader = req.headers['authorization'];
+	const authHeader = req.headers.authorization || req.headers.Authorization;
 
-	// Check if the header is not undefined and starts with 'Bearer'
-	if (!authHeader || !authHeader.startsWith('Bearer ')) {
-		return res.status(401).json({
-			message: 'Authorization header missing or improperly formatted',
-		});
+	if (!authHeader?.startsWith('Bearer ')) {
+		console.log('No auth header or incorrect format');
+		return res.status(401).json({ message: 'Unauthorized' });
 	}
 
-	// Extract the token
-	const token = authHeader.split(' ')[1]; // This will handle properly formatted 'Bearer token'
+	const token = authHeader.split(' ')[1];
 
-	// Verify the token
-	jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+	jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
 		if (err) {
-			return res.status(403).json({ message: 'Failed to authenticate token' });
+			console.log('Token verification error:', err);
+			return res.status(403).json({ message: 'Forbidden' });
 		}
-		req.user = decoded; // Assuming the decoded token contains user info
+		console.log('Decoded Token:', decoded);
+		req.user = decoded.UserInfo;
 		next();
 	});
 };

@@ -2,35 +2,88 @@
 
 import mongoose from 'mongoose';
 
-// Define Entry Schema
-const EntrySchema = new mongoose.Schema({
-	title: { type: String, required: true },
-	value: { type: mongoose.Schema.Types.Mixed, required: true },
-	date: { type: String, required: true },
+const Schema = mongoose.Schema;
+
+// Updated DataSchema to allow 'value' as String or Number and 'date' as String
+const DataSchema = new Schema({
+	title: {
+		type: String,
+		required: true,
+	},
+	value: {
+		type: Schema.Types.Mixed, // Allows both String and Number
+		required: true,
+	},
+	date: {
+		type: String, // Storing as ISO string
+		required: true,
+	},
 });
 
-// Define IndexedEntries Schema
-const IndexedEntriesSchema = new mongoose.Schema({
-	chartType: { type: String, required: true },
-	id: { type: Number, required: true },
-	data: [EntrySchema],
-	isChartTypeChanged: { type: Boolean, default: false },
+// Updated ChartSchema
+const ChartSchema = new Schema({
+	chartType: {
+		type: String,
+		enum: [
+			'EntryArea',
+			'IndexArea',
+			'EntryLine',
+			'IndexLine',
+			'TradingLine',
+			'IndexBar',
+			'Bar',
+			'Pie',
+			'Line',
+			'Radar',
+		],
+		required: true,
+	},
+	data: {
+		type: [DataSchema],
+		required: true,
+	},
+	id: {
+		type: Number,
+		required: true,
+	},
+	isChartTypeChanged: {
+		type: Boolean,
+		default: false,
+	},
 });
 
-// Define DashboardCategory Schema
-const DashboardCategorySchema = new mongoose.Schema({
-	category: { type: String, required: true },
-	mainData: [IndexedEntriesSchema],
-	combinedData: [Number],
+// Updated DashboardCategorySchema
+const DashboardCategorySchema = new Schema({
+	categoryName: {
+		type: String,
+		required: true,
+	},
+	mainData: {
+		type: [ChartSchema],
+		required: true,
+	},
+	combinedData: {
+		type: [Number],
+		default: [],
+	},
 });
 
-// Define Data Schema
-const DataSchema = new mongoose.Schema({
-	user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-	DashboardId: { type: Number, required: true },
-	dashboardData: [DashboardCategorySchema],
+// Updated DashboardSchema
+const DashboardSchema = new Schema({
+	DashboardId: {
+		type: Number,
+		required: true,
+		unique: true,
+	},
+	dashboardData: {
+		type: [DashboardCategorySchema],
+		required: true,
+	},
+	userId: {
+		type: Schema.Types.ObjectId,
+		ref: 'User',
+		required: true,
+	},
 });
 
-const Data = mongoose.model('Data', DataSchema);
-
-export default Data;
+export default mongoose.model('Dashboard', DashboardSchema);

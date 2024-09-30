@@ -56,6 +56,7 @@ app.use('/documentProcess', documentProcessRoutes);
 app.use('/chat', chatRoute);
 
 app.use(verifyJWT);
+app.use('/data', dataRoutes);
 app.use('/users', userRoutes);
 
 app.all('*', (req, res) => {

@@ -1,3 +1,4 @@
+// controllers/registerController.js
 import User from '../model/User.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
@@ -22,9 +23,15 @@ const handleNewUser = async (req, res) => {
 		});
 
 		const accessToken = jwt.sign(
-			{ username: newUser.username, email: newUser.email },
+			{
+				UserInfo: {
+					id: newUser._id,
+					username: newUser.username,
+					email: newUser.email,
+				},
+			},
 			process.env.ACCESS_TOKEN_SECRET,
-			{ expiresIn: '10m' }
+			{ expiresIn: '1d' }
 		);
 
 		const refreshToken = jwt.sign(
