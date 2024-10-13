@@ -1,10 +1,10 @@
 // models/Data.js
-
 import mongoose from 'mongoose';
+import { v4 as uuidv4 } from 'uuid';
 
-const Schema = mongoose.Schema;
+const { Schema } = mongoose;
 
-// Updated DataSchema to allow 'value' as String or Number and 'date' as String
+// DataSchema
 const DataSchema = new Schema({
 	title: {
 		type: String,
@@ -15,12 +15,16 @@ const DataSchema = new Schema({
 		required: true,
 	},
 	date: {
-		type: String, // Storing as ISO string
+		type: String, // Store date as a string in ISO format
+		required: true,
+	},
+	fileName: {
+		type: String,
 		required: true,
 	},
 });
 
-// Updated ChartSchema
+// ChartSchema
 const ChartSchema = new Schema({
 	chartType: {
 		type: String,
@@ -35,50 +39,60 @@ const ChartSchema = new Schema({
 			'Pie',
 			'Line',
 			'Radar',
+			'Area', // Include 'Area' if needed
 		],
 		required: true,
 	},
+	id: {
+		type: String,
+		required: true,
+		default: () => uuidv4(), // Generate UUID
+	},
 	data: {
 		type: [DataSchema],
-		required: true,
-	},
-	id: {
-		type: Number,
 		required: true,
 	},
 	isChartTypeChanged: {
 		type: Boolean,
 		default: false,
 	},
-});
-
-// Updated DashboardCategorySchema
-const DashboardCategorySchema = new Schema({
-	categoryName: {
+	fileName: {
 		type: String,
 		required: true,
 	},
-	mainData: {
-		type: [ChartSchema],
-		required: true,
-	},
-	combinedData: {
-		type: [Number],
-		default: [],
-	},
 });
 
-// Updated DashboardSchema
-const DashboardSchema = new Schema({
-	DashboardId: {
-		type: Number,
-		required: true,
-		unique: true,
+// DashboardCategorySchema
+const DashboardCategorySchema = new Schema(
+	{
+		categoryName: {
+			type: String,
+			required: true,
+		},
+		mainData: {
+			type: [ChartSchema],
+			required: true,
+		},
+		combinedData: {
+			type: [Number],
+			default: [],
+		},
 	},
+	{ _id: false } // Prevent Mongoose from creating _id fields for subdocuments
+);
+
+// DashboardSchema
+const DashboardSchema = new Schema({
 	dashboardData: {
 		type: [DashboardCategorySchema],
 		required: true,
 	},
+	files: [
+		{
+			filename: String,
+			content: Schema.Types.Mixed, // Store the content of the file here
+		},
+	],
 	userId: {
 		type: Schema.Types.ObjectId,
 		ref: 'User',
@@ -86,4 +100,6 @@ const DashboardSchema = new Schema({
 	},
 });
 
-export default mongoose.model('Dashboard', DashboardSchema);
+// Export the Dashboard model
+const Dashboard = mongoose.model('Dashboard', DashboardSchema);
+export default Dashboard;

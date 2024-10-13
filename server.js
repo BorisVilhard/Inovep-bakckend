@@ -51,7 +51,6 @@ app.use('/register', registerRoutes);
 app.use('/auth', authRoutes);
 app.use('/refresh', refreshRoutes);
 app.use('/logout', logoutRoutes);
-app.use('/documentProcess', documentProcessRoutes);
 
 app.use('/chat', chatRoute);
 

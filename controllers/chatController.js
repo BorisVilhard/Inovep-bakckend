@@ -1,10 +1,17 @@
+// controllers/chatController.js
+import { ChatOpenAI } from '@langchain/openai';
+// controllers/chatController.js
+
+import Chat from '../model/Chat.js';
+import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
 import xlsx from 'xlsx';
 import { fileTypeFromBuffer } from 'file-type';
-import { ChatOpenAI } from '@langchain/openai';
-import { PromptTemplate } from '@langchain/core/prompts';
-import { HttpResponseOutputParser } from 'langchain/output_parsers';
 
+import { PromptTemplate } from 'langchain/prompts';
+import { LLMChain } from 'langchain/chains';
+
+// Constants
 const MAX_MESSAGES = 10;
 const MAX_FILE_CONTENT_LENGTH = 1000;
 
@@ -13,7 +20,7 @@ const formatMessage = (message) => {
 };
 
 // Updated prompt template with {file_content}
-const TEMPLATE = `You are a data analyzer, you are given a data in array and you answer questions regarding the data.
+const TEMPLATE = `You are a data analyzer, you are given data in an array and you answer questions regarding the data.
 
 Data provided:
 {file_content}
@@ -92,9 +99,21 @@ const handleFileExtraction = async (fileContent) => {
 	}
 };
 
-// Main handler function for chat post requests
-export const handleChatPost = async (req, res) => {
+// Verify User Ownership Middleware
+export const verifyUserOwnership = (req, res, next) => {
+	const userIdFromToken = req.user.id;
+	const userIdFromParams = req.params.userId;
+
+	if (userIdFromToken !== userIdFromParams) {
+		return res.status(403).json({ message: 'Access denied' });
+	}
+	next();
+};
+
+// Create or update a chat for a user
+export const createOrUpdateChat = async (req, res) => {
 	try {
+		const { userId } = req.params;
 		const { messages, fileContent } = req.body;
 
 		// Validate messages
@@ -102,59 +121,138 @@ export const handleChatPost = async (req, res) => {
 			return res.status(400).json({ error: 'Invalid messages format' });
 		}
 
-		// Format recent messages
-		const recentMessages = messages.slice(-MAX_MESSAGES).map(formatMessage);
-		const currentMessageContent = messages.at(-1)?.content || '';
+		// Check if a chat exists for the user
+		let chat = await Chat.findOne({ userId });
 
-		let extractedText = '';
+		let isNewChat = false;
+		if (!chat) {
+			isNewChat = true;
+			chat = new Chat({
+				userId,
+				messages: [],
+			});
+		}
 
 		// Handle file content if provided
 		if (fileContent) {
-			extractedText = await handleFileExtraction(fileContent);
-			console.log('Extracted Text:', extractedText); // Debugging line
+			const extractedText = await handleFileExtraction(fileContent);
+			chat.fileContent = extractedText || '';
 		}
 
-		// Build the chat history without the file content
-		const chatHistory = recentMessages.join('\n');
-		// Ensure extractedText is not null or undefined
-		const fileContentText = extractedText || '';
+		// Format recent messages
+		const recentMessages = chat.messages
+			.slice(-MAX_MESSAGES)
+			.map(formatMessage);
+		// Append new user messages
+		const newUserMessages = messages.map(formatMessage);
+		const allRecentMessages = [...recentMessages, ...newUserMessages].slice(
+			-MAX_MESSAGES
+		);
+
+		const chatHistory = allRecentMessages.join('\n');
+		const fileContentText = chat.fileContent || '';
 
 		// Create prompt
-		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
+		const prompt = new PromptTemplate({
+			template: TEMPLATE,
+			inputVariables: ['chat_history', 'file_content', 'input'],
+		});
 
 		// Initialize the model
 		const model = new ChatOpenAI({
-			apiKey: process.env.OPENAI_API_KEY,
-			model: 'gpt-3.5-turbo',
+			openAIApiKey: process.env.OPENAI_API_KEY,
+			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
 		});
 
-		// Set up the output parser
-		const parser = new HttpResponseOutputParser();
-		const chain = prompt.pipe(model).pipe(parser);
+		// Create the chain
+		const chain = new LLMChain({ llm: model, prompt });
 
-		// Get the response stream
-		const stream = await chain.stream({
+		// Get the assistant's response
+		const assistantResponse = await chain.call({
 			chat_history: chatHistory,
 			file_content: fileContentText,
-			input: currentMessageContent,
+			input: messages.at(-1)?.content || '',
 		});
 
-		// Read and decode the response stream
-		const reader = stream.getReader();
-		const decoder = new TextDecoder('utf-8');
-		let plainText = '';
+		const assistantText = assistantResponse.text.trim();
 
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			plainText += decoder.decode(value, { stream: true });
+		// Create assistant's message
+		const assistantMessage = { role: 'assistant', content: assistantText };
+
+		// Append user's messages and assistant's response to chat
+		messages.forEach((msg) => chat.messages.push(msg));
+		chat.messages.push(assistantMessage);
+
+		// Save the chat
+		await chat.save();
+
+		// Return the assistant's response and chatId if new chat was created
+		const responseData = { message: assistantText };
+		if (isNewChat) {
+			responseData.chatId = chat._id;
 		}
 
-		// Send the assistant's response
-		res.status(200).send(plainText.trim());
+		res.status(200).json(responseData);
 	} catch (error) {
 		console.error('Error processing request:', error);
 		res.status(error.status ?? 500).json({ error: error.message });
+	}
+};
+
+// Delete a chat for a user
+export const deleteChat = async (req, res) => {
+	const userId = req.params.userId;
+	const { chatId } = req.params;
+
+	if (!mongoose.Types.ObjectId.isValid(chatId)) {
+		return res.status(400).json({ message: 'Invalid chat ID' });
+	}
+
+	try {
+		const chat = await Chat.findOne({ _id: chatId, userId });
+		if (!chat) {
+			return res.status(404).json({ message: `Chat ID ${chatId} not found` });
+		}
+
+		await chat.deleteOne();
+		res.json({ message: 'Chat deleted successfully' });
+	} catch (error) {
+		console.error('Error deleting chat:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+// controllers/chatController.js
+
+export const getAllChatsForUser = async (req, res) => {
+	const userId = req.params.userId;
+	try {
+		const chats = await Chat.find({ userId }, '_id createdAt').sort({
+			createdAt: -1,
+		});
+		if (!chats || chats.length === 0) {
+			return res.status(204).json({ message: 'No chats found' });
+		}
+		res.json(chats);
+	} catch (error) {
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+export const getChatById = async (req, res) => {
+	const userId = req.params.userId;
+	const { chatId } = req.params;
+	try {
+		if (!mongoose.Types.ObjectId.isValid(chatId)) {
+			return res.status(400).json({ message: 'Invalid chat ID' });
+		}
+		const chat = await Chat.findOne({ _id: chatId, userId });
+		if (!chat) {
+			return res.status(404).json({ message: `Chat ID ${chatId} not found` });
+		}
+		res.json(chat); // Returns the entire chat document
+	} catch (error) {
+		res.status(500).json({ message: 'Server error', error });
 	}
 };
