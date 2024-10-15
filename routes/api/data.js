@@ -1,4 +1,3 @@
-// routes/dataRoutes.js
 import express from 'express';
 import multer from 'multer';
 import {
@@ -10,6 +9,7 @@ import {
 	deleteDataByFileName,
 	verifyUserOwnership,
 	getDashboardFiles,
+	createDashboard,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
@@ -19,10 +19,20 @@ const upload = multer({ dest: 'uploads/' });
 
 router.use(verifyJWT);
 
-router
-	.route('/users/:id/dashboard')
-	.get(verifyUserOwnership, getAllDashboards)
-	.post(verifyUserOwnership, upload.single('file'), createOrUpdateDashboard);
+router.route('/users/:id/dashboard').get(verifyUserOwnership, getAllDashboards);
+
+router.post(
+	'/users/:id/dashboard/create',
+	verifyUserOwnership,
+	createDashboard
+);
+
+router.post(
+	'/users/:id/dashboard/upload',
+	verifyUserOwnership,
+	upload.single('file'),
+	createOrUpdateDashboard
+);
 
 router.get(
 	'/users/:id/dashboard/:dashboardId/files',

@@ -1,4 +1,5 @@
 // controllers/dataController.js
+
 import Dashboard from '../model/Data.js';
 import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
@@ -45,11 +46,42 @@ export const getDashboardById = async (req, res) => {
 	}
 };
 
+// Create a new dashboard
+// controllers/dataController.js
+
+export const createDashboard = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardName } = req.body;
+
+	if (!dashboardName) {
+		return res.status(400).json({ message: 'dashboardName is required' });
+	}
+
+	try {
+		// Remove any references to DashboardId
+		const dashboard = new Dashboard({
+			dashboardName,
+			dashboardData: [],
+			files: [],
+			userId,
+		});
+
+		await dashboard.save();
+
+		res
+			.status(201)
+			.json({ message: 'Dashboard created successfully', dashboard });
+	} catch (error) {
+		console.error('Error creating dashboard:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
 // Create a new dashboard or merge data into an existing one
 export const createOrUpdateDashboard = async (req, res) => {
 	try {
 		const userId = req.params.id;
-		const { dashboardId } = req.body; // Get dashboardId from request body
+		const { dashboardId, dashboardName } = req.body; // Get dashboardId and dashboardName from request body
 
 		if (!req.file) {
 			return res.status(400).json({ message: 'No file uploaded' });
@@ -107,7 +139,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 		// Extract the JavaScript code containing the data array from the response
 		const extractedData = extractJavascriptCode(aiResponseContent);
 		const formedData = transformDataStructure(extractedData, fileName); // Pass fileName here
-		console.log('data=', JSON.stringify(formedData, null, 4));
 
 		// Extract dashboardData from formedData
 		const { dashboardData } = formedData;
@@ -146,13 +177,36 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 
 			// Add the file to the files array
 			dashboard.files.push(fileData);
-		} else {
+		} else if (dashboardName) {
 			// Create a new dashboard
+			// Check if dashboardName is unique
+			const existingDashboard = await Dashboard.findOne({
+				dashboardName,
+				userId,
+			});
+			if (existingDashboard) {
+				fs.unlink(filePath, (err) => {
+					if (err) console.error('Error deleting file:', err);
+				});
+				return res
+					.status(400)
+					.json({ message: 'Dashboard name already exists' });
+			}
+
 			dashboard = new Dashboard({
+				dashboardName,
 				dashboardData,
 				files: [fileData],
 				userId,
 			});
+		} else {
+			// No dashboardId or dashboardName provided
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res
+				.status(400)
+				.json({ message: 'dashboardId or dashboardName is required' });
 		}
 
 		await dashboard.save();
@@ -181,14 +235,18 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 	}
 };
 
+// controllers/dataController.js
+
 // Update an existing dashboard
 export const updateDashboard = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId } = req.params;
-	const { dashboardData } = req.body;
+	const { dashboardData, dashboardName } = req.body;
 
-	if (!dashboardData) {
-		return res.status(400).json({ message: 'dashboardData is required' });
+	if (!dashboardData && !dashboardName) {
+		return res
+			.status(400)
+			.json({ message: 'dashboardData or dashboardName is required' });
 	}
 
 	try {
@@ -202,8 +260,24 @@ export const updateDashboard = async (req, res) => {
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
 
-		// Update the dashboardData
-		dashboard.dashboardData = dashboardData;
+		// If updating dashboardName, ensure it's unique
+		if (dashboardName && dashboardName !== dashboard.dashboardName) {
+			const existingDashboard = await Dashboard.findOne({
+				dashboardName,
+				userId,
+			});
+			if (existingDashboard) {
+				return res
+					.status(400)
+					.json({ message: 'Dashboard name already exists' });
+			}
+			dashboard.dashboardName = dashboardName;
+		}
+
+		// Update dashboardData if provided
+		if (dashboardData) {
+			dashboard.dashboardData = dashboardData;
+		}
 
 		await dashboard.save();
 		res.json({ message: 'Dashboard updated successfully', dashboard });
