@@ -114,21 +114,31 @@ export const verifyUserOwnership = (req, res, next) => {
 export const createOrUpdateChat = async (req, res) => {
 	try {
 		const { userId } = req.params;
-		const { messages, fileContent } = req.body;
+		const { messages, fileContent, dashboardId, dashboardName, dashboardData } =
+			req.body;
 
 		// Validate messages
 		if (!messages || !Array.isArray(messages)) {
 			return res.status(400).json({ error: 'Invalid messages format' });
 		}
 
-		// Check if a chat exists for the user
-		let chat = await Chat.findOne({ userId });
+		// Validate dashboardId and dashboardName
+		if (!dashboardId || !dashboardName) {
+			return res
+				.status(400)
+				.json({ error: 'dashboardId and dashboardName are required' });
+		}
+
+		// Check if a chat exists for the user and dashboard
+		let chat = await Chat.findOne({ userId, dashboardId });
 
 		let isNewChat = false;
 		if (!chat) {
 			isNewChat = true;
 			chat = new Chat({
 				userId,
+				dashboardId,
+				dashboardName,
 				messages: [],
 			});
 		}
@@ -137,6 +147,14 @@ export const createOrUpdateChat = async (req, res) => {
 		if (fileContent) {
 			const extractedText = await handleFileExtraction(fileContent);
 			chat.fileContent = extractedText || '';
+		}
+
+		// Use dashboardData as fileContent if provided
+		if (dashboardData) {
+			chat.fileContent = JSON.stringify(dashboardData).slice(
+				0,
+				MAX_FILE_CONTENT_LENGTH
+			);
 		}
 
 		// Format recent messages
@@ -191,6 +209,7 @@ export const createOrUpdateChat = async (req, res) => {
 		const responseData = { message: assistantText };
 		if (isNewChat) {
 			responseData.chatId = chat._id;
+			responseData.chat = chat; // Include chat data
 		}
 
 		res.status(200).json(responseData);
@@ -228,9 +247,9 @@ export const deleteChat = async (req, res) => {
 export const getAllChatsForUser = async (req, res) => {
 	const userId = req.params.userId;
 	try {
-		const chats = await Chat.find({ userId }, '_id createdAt').sort({
-			createdAt: -1,
-		});
+		const chats = await Chat.find({ userId })
+			.select('_id createdAt dashboardId dashboardName')
+			.sort({ createdAt: -1 });
 		if (!chats || chats.length === 0) {
 			return res.status(204).json({ message: 'No chats found' });
 		}

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 
 const Schema = mongoose.Schema;
 
+// Define MessageSchema
 const MessageSchema = new Schema({
 	role: {
 		type: String,
@@ -20,12 +21,22 @@ const MessageSchema = new Schema({
 	},
 });
 
+// Define ChatSchema
 const ChatSchema = new Schema({
 	userId: {
 		type: Schema.Types.ObjectId,
 		ref: 'User',
 		required: true,
-		unique: true, // Enforces one chat per user
+		// unique: true, // Removed to allow multiple chats per user
+	},
+	dashboardId: {
+		type: Schema.Types.ObjectId,
+		ref: 'Dashboard',
+		required: true,
+	},
+	dashboardName: {
+		type: String,
+		required: true,
 	},
 	messages: {
 		type: [MessageSchema],
