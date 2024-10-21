@@ -15,6 +15,15 @@ import path from 'path';
 const UPLOAD_FOLDER = './uploads';
 
 function generateChartId(categoryName, chartTitle) {
+	if (typeof categoryName !== 'string') {
+		console.error('categoryName is not a string:', categoryName);
+		categoryName = String(categoryName);
+	}
+	if (typeof chartTitle !== 'string') {
+		console.error('chartTitle is not a string:', chartTitle);
+		chartTitle = String(chartTitle);
+	}
+
 	return `${categoryName.toLowerCase().replace(/\s+/g, '-')}-${chartTitle
 		.toLowerCase()
 		.replace(/\s+/g, '-')}`;
@@ -481,27 +490,46 @@ function cleanNumeric(value) {
 	return value;
 }
 
-// Transform data into the desired structure
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
 	const today = format(new Date(), 'yyyy-MM-dd');
 
 	data.forEach((item) => {
 		const groupNameKey = Object.keys(item)[0];
-		const monthName = item[groupNameKey];
+		let monthName = item[groupNameKey];
 		delete item[groupNameKey];
+
+		// Convert monthName to string if it's not
+		if (typeof monthName !== 'string') {
+			console.warn(
+				'monthName is not a string. Converting to string.',
+				monthName
+			);
+			monthName = String(monthName);
+		}
 
 		if (monthName) {
 			const charts = [];
 			for (const [key, value] of Object.entries(item)) {
+				// Ensure key is a string
+				let chartTitle = key;
+				if (typeof chartTitle !== 'string') {
+					console.warn(
+						'chartTitle is not a string. Converting to string.',
+						chartTitle
+					);
+					chartTitle = String(chartTitle);
+				}
+
 				const cleanedValue = cleanNumeric(value);
-				const chartId = generateChartId(monthName, key);
+				const chartId = generateChartId(monthName, chartTitle);
+
 				charts.push({
 					chartType: 'Area',
-					id: chartId, // Use consistent id generation
+					id: chartId,
 					data: [
 						{
-							title: key,
+							title: chartTitle,
 							value: cleanedValue,
 							date: today,
 							fileName: fileName,
