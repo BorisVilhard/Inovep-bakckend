@@ -11,9 +11,14 @@ import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import fs from 'fs';
 import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
 
 const UPLOAD_FOLDER = './uploads';
+
+function generateChartId(categoryName, chartTitle) {
+	return `${categoryName.toLowerCase().replace(/\s+/g, '-')}-${chartTitle
+		.toLowerCase()
+		.replace(/\s+/g, '-')}`;
+}
 
 // Verify User Ownership Middleware
 export const verifyUserOwnership = (req, res, next) => {
@@ -24,6 +29,20 @@ export const verifyUserOwnership = (req, res, next) => {
 		return res.status(403).json({ message: 'Access denied' });
 	}
 	next();
+};
+
+// Get all dashboards for a user
+export const getAllDashboards = async (req, res) => {
+	const userId = req.params.id;
+	try {
+		const dashboards = await Dashboard.find({ userId });
+		if (!dashboards || dashboards.length === 0) {
+			return res.status(204).json({ message: 'No dashboards found' });
+		}
+		res.json(dashboards);
+	} catch (error) {
+		res.status(500).json({ message: 'Server error', error });
+	}
 };
 
 // Get a specific dashboard for a user
@@ -47,8 +66,6 @@ export const getDashboardById = async (req, res) => {
 };
 
 // Create a new dashboard
-// controllers/dataController.js
-
 export const createDashboard = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardName } = req.body;
@@ -58,7 +75,15 @@ export const createDashboard = async (req, res) => {
 	}
 
 	try {
-		// Remove any references to DashboardId
+		// Check if dashboardName is unique for the user
+		const existingDashboard = await Dashboard.findOne({
+			dashboardName,
+			userId,
+		});
+		if (existingDashboard) {
+			return res.status(400).json({ message: 'Dashboard name already exists' });
+		}
+
 		const dashboard = new Dashboard({
 			dashboardName,
 			dashboardData: [],
@@ -77,11 +102,11 @@ export const createDashboard = async (req, res) => {
 	}
 };
 
-// Create a new dashboard or merge data into an existing one
+// Upload a file and update or create a dashboard
 export const createOrUpdateDashboard = async (req, res) => {
 	try {
 		const userId = req.params.id;
-		const { dashboardId, dashboardName } = req.body; // Get dashboardId and dashboardName from request body
+		const { dashboardId, dashboardName } = req.body;
 
 		if (!req.file) {
 			return res.status(400).json({ message: 'No file uploaded' });
@@ -90,7 +115,7 @@ export const createOrUpdateDashboard = async (req, res) => {
 		const file = req.file;
 		const filePath = path.join(UPLOAD_FOLDER, file.filename);
 		const fileType = file.mimetype;
-		const fileName = file.originalname; // Extract original file name
+		const fileName = file.originalname;
 
 		// Validate file type
 		const allowedTypes = [
@@ -138,7 +163,7 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 
 		// Extract the JavaScript code containing the data array from the response
 		const extractedData = extractJavascriptCode(aiResponseContent);
-		const formedData = transformDataStructure(extractedData, fileName); // Pass fileName here
+		const formedData = transformDataStructure(extractedData, fileName);
 
 		// Extract dashboardData from formedData
 		const { dashboardData } = formedData;
@@ -234,8 +259,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 		res.status(500).json({ error: error.message });
 	}
 };
-
-// controllers/dataController.js
 
 // Update an existing dashboard
 export const updateDashboard = async (req, res) => {
@@ -361,6 +384,28 @@ export const deleteDataByFileName = async (req, res) => {
 	}
 };
 
+// Get all files associated with a dashboard
+export const getDashboardFiles = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId } = req.params;
+	try {
+		const dashboard = await Dashboard.findOne({
+			_id: dashboardId,
+			userId,
+		});
+		if (!dashboard) {
+			return res
+				.status(404)
+				.json({ message: `Dashboard ID ${dashboardId} not found` });
+		}
+
+		const files = dashboard.files.map((file) => file.filename);
+		res.json({ files });
+	} catch (error) {
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
 // Function to extract text from different document types
 const getDocumentText = async (filePath, fileType) => {
 	let text = '';
@@ -436,6 +481,7 @@ function cleanNumeric(value) {
 	return value;
 }
 
+// Transform data into the desired structure
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
 	const today = format(new Date(), 'yyyy-MM-dd');
@@ -449,15 +495,16 @@ function transformDataStructure(data, fileName) {
 			const charts = [];
 			for (const [key, value] of Object.entries(item)) {
 				const cleanedValue = cleanNumeric(value);
+				const chartId = generateChartId(monthName, key);
 				charts.push({
 					chartType: 'Area',
-					id: uuidv4(), // Generate a unique ID
+					id: chartId, // Use consistent id generation
 					data: [
 						{
 							title: key,
 							value: cleanedValue,
 							date: today,
-							fileName: fileName, // Include fileName here
+							fileName: fileName,
 						},
 					],
 					isChartTypeChanged: false,
@@ -475,26 +522,29 @@ function transformDataStructure(data, fileName) {
 	return { dashboardData };
 }
 
+// Merge new dashboard data into existing dashboard data
 function mergeDashboardData(existingData, newData) {
 	const mergedData = [...existingData];
 
 	newData.forEach((newCategory) => {
-		const existingCategoryIndex = mergedData.findIndex(
+		const existingCategory = mergedData.find(
 			(cat) => cat.categoryName === newCategory.categoryName
 		);
 
-		if (existingCategoryIndex !== -1) {
-			const existingCategory = mergedData[existingCategoryIndex];
-
+		if (existingCategory) {
 			newCategory.mainData.forEach((newChart) => {
-				const newChartTitle = newChart.data[0]?.title;
+				const newChartId = newChart.id;
 
-				const existingChartIndex = existingCategory.mainData.findIndex(
-					(chart) => chart.data[0]?.title === newChartTitle
+				if (!newChartId) {
+					console.error('New chart is missing an id.');
+					return;
+				}
+
+				const existingChart = existingCategory.mainData.find(
+					(chart) => chart.id === newChartId
 				);
 
-				if (existingChartIndex !== -1) {
-					const existingChart = existingCategory.mainData[existingChartIndex];
+				if (existingChart) {
 					// Merge data arrays
 					existingChart.data = [...existingChart.data, ...newChart.data];
 				} else {
@@ -508,39 +558,3 @@ function mergeDashboardData(existingData, newData) {
 
 	return mergedData;
 }
-
-// Get all dashboards for a user
-export const getAllDashboards = async (req, res) => {
-	const userId = req.params.id;
-	try {
-		const dashboards = await Dashboard.find({ userId });
-		if (!dashboards || dashboards.length === 0) {
-			return res.status(204).json({ message: 'No dashboards found' });
-		}
-		res.json(dashboards);
-	} catch (error) {
-		res.status(500).json({ message: 'Server error', error });
-	}
-};
-
-// Get all files associated with a dashboard
-export const getDashboardFiles = async (req, res) => {
-	const userId = req.params.id;
-	const { dashboardId } = req.params;
-	try {
-		const dashboard = await Dashboard.findOne({
-			_id: dashboardId,
-			userId,
-		});
-		if (!dashboard) {
-			return res
-				.status(404)
-				.json({ message: `Dashboard ID ${dashboardId} not found` });
-		}
-
-		const files = dashboard.files.map((file) => file.filename);
-		res.json({ files });
-	} catch (error) {
-		res.status(500).json({ message: 'Server error', error });
-	}
-};
