@@ -573,8 +573,15 @@ function mergeDashboardData(existingData, newData) {
 				);
 
 				if (existingChart) {
-					// Merge data arrays
-					existingChart.data = [...existingChart.data, ...newChart.data];
+					// Check the type of value in newChart.data[0].value
+					const newValue = newChart.data[0]?.value;
+					if (typeof newValue === 'string') {
+						// Replace existing data with new data
+						existingChart.data = newChart.data;
+					} else {
+						// Merge data arrays
+						existingChart.data = [...existingChart.data, ...newChart.data];
+					}
 				} else {
 					existingCategory.mainData.push(newChart);
 				}
