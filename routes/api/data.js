@@ -10,6 +10,8 @@ import {
 	verifyUserOwnership,
 	getDashboardFiles,
 	createDashboard,
+	updateChartType,
+	updateCategoryData,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
@@ -45,6 +47,18 @@ router
 	.get(verifyUserOwnership, getDashboardById)
 	.put(verifyUserOwnership, updateDashboard)
 	.delete(verifyUserOwnership, deleteDashboard);
+
+router.put(
+	'/users/:id/dashboard/:dashboardId/chart/:chartId',
+	verifyUserOwnership,
+	updateChartType
+);
+
+router.put(
+	'/users/:id/dashboard/:dashboardId/category/:categoryName',
+	verifyUserOwnership,
+	updateCategoryData
+);
 
 router.delete(
 	'/users/:id/dashboard/:dashboardId/file/:fileName',

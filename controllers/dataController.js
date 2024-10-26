@@ -1,5 +1,3 @@
-// controllers/dataController.js
-
 import Dashboard from '../model/Data.js';
 import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
@@ -593,3 +591,89 @@ function mergeDashboardData(existingData, newData) {
 
 	return mergedData;
 }
+
+export const updateChartType = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId, chartId } = req.params;
+	const { chartType } = req.body;
+
+	if (!chartType) {
+		return res.status(400).json({ message: 'chartType is required' });
+	}
+
+	try {
+		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+			return res.status(400).json({ message: 'Invalid dashboard ID' });
+		}
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res
+				.status(404)
+				.json({ message: `Dashboard ID ${dashboardId} not found` });
+		}
+
+		let chartFound = false;
+
+		for (let category of dashboard.dashboardData) {
+			for (let chart of category.mainData) {
+				if (chart.id === chartId) {
+					chart.chartType = chartType;
+					chart.isChartTypeChanged = true;
+					chartFound = true;
+					break;
+				}
+			}
+			if (chartFound) break;
+		}
+
+		if (!chartFound) {
+			return res.status(404).json({ message: `Chart ID ${chartId} not found` });
+		}
+
+		await dashboard.save();
+		res.json({ message: 'ChartType updated successfully', dashboard });
+	} catch (error) {
+		console.error('Error updating chartType:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+export const updateCategoryData = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId, categoryName } = req.params;
+	const { combinedData, summaryData } = req.body;
+
+	try {
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res
+				.status(404)
+				.json({ message: `Dashboard ID ${dashboardId} not found` });
+		}
+
+		const category = dashboard.dashboardData.find(
+			(cat) => cat.categoryName === categoryName
+		);
+
+		if (!category) {
+			return res
+				.status(404)
+				.json({ message: `Category ${categoryName} not found` });
+		}
+
+		if (combinedData) {
+			category.combinedData = combinedData;
+		}
+
+		if (summaryData) {
+			category.summaryData = summaryData;
+		}
+
+		await dashboard.save();
+
+		res.json({ message: 'Category data updated successfully', dashboard });
+	} catch (error) {
+		console.error('Error updating category data:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};

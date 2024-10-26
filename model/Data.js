@@ -2,6 +2,20 @@
 
 import mongoose from 'mongoose';
 
+const validChartTypes = [
+	'EntryArea',
+	'IndexArea',
+	'EntryLine',
+	'IndexLine',
+	'TradingLine',
+	'IndexBar',
+	'Bar',
+	'Pie',
+	'Line',
+	'Radar',
+	'Area',
+];
+
 const EntrySchema = new mongoose.Schema({
 	title: { type: String, required: true },
 	value: { type: mongoose.Schema.Types.Mixed, required: true },
@@ -11,7 +25,7 @@ const EntrySchema = new mongoose.Schema({
 
 const IndexedEntriesSchema = new mongoose.Schema({
 	id: { type: String, required: true },
-	chartType: { type: String, required: true },
+	chartType: { type: String, required: true, enum: validChartTypes },
 	data: [EntrySchema],
 	isChartTypeChanged: { type: Boolean, default: false },
 	fileName: { type: String, required: true },
@@ -20,7 +34,7 @@ const IndexedEntriesSchema = new mongoose.Schema({
 const DashboardCategorySchema = new mongoose.Schema({
 	categoryName: { type: String, required: true },
 	mainData: [IndexedEntriesSchema],
-	combinedData: { type: [Number], default: [] },
+	combinedData: { type: [IndexedEntriesSchema], default: [] }, // Updated from [Number] to [IndexedEntriesSchema]
 });
 
 const DashboardSchema = new mongoose.Schema({
