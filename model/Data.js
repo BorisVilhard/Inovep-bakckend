@@ -34,7 +34,10 @@ const IndexedEntriesSchema = new mongoose.Schema({
 const DashboardCategorySchema = new mongoose.Schema({
 	categoryName: { type: String, required: true },
 	mainData: [IndexedEntriesSchema],
-	combinedData: { type: [IndexedEntriesSchema], default: [] }, // Updated from [Number] to [IndexedEntriesSchema]
+	combinedData: { type: [IndexedEntriesSchema], default: [] },
+	summaryData: { type: [EntrySchema], default: [] }, // Add this line
+	appliedChartType: { type: String, enum: validChartTypes },
+	checkedIds: { type: [String], default: [] },
 });
 
 const DashboardSchema = new mongoose.Schema({

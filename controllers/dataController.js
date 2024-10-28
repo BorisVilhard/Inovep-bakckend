@@ -641,7 +641,7 @@ export const updateChartType = async (req, res) => {
 export const updateCategoryData = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryName } = req.params;
-	const { combinedData, summaryData } = req.body;
+	const { combinedData, summaryData, appliedChartType, checkedIds } = req.body;
 
 	try {
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
@@ -667,6 +667,14 @@ export const updateCategoryData = async (req, res) => {
 
 		if (summaryData) {
 			category.summaryData = summaryData;
+		}
+
+		if (appliedChartType) {
+			category.appliedChartType = appliedChartType;
+		}
+
+		if (checkedIds) {
+			category.checkedIds = checkedIds;
 		}
 
 		await dashboard.save();
