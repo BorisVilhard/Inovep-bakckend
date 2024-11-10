@@ -685,3 +685,97 @@ export const updateCategoryData = async (req, res) => {
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
+
+// controllers/dataController.js
+
+export const processFile = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		if (!req.file) {
+			return res.status(400).json({ message: 'No file uploaded' });
+		}
+
+		const file = req.file;
+		const filePath = path.join(UPLOAD_FOLDER, file.filename);
+		const fileType = file.mimetype;
+		const fileName = file.originalname;
+
+		// Validate file type
+		const allowedTypes = [
+			'application/pdf',
+			'image/png',
+			'image/jpeg',
+			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			'application/vnd.ms-excel',
+		];
+
+		if (!allowedTypes.includes(fileType)) {
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res.status(400).json({ message: 'Unsupported file type' });
+		}
+
+		// Extract text from the uploaded document
+		const documentText = await getDocumentText(filePath, fileType);
+
+		// Set up the prompt template
+		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
+
+Given the following text:
+{document_text}
+
+Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
+
+		// Initialize the prompt with the extracted document text
+		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
+		const formattedPrompt = await prompt.format({
+			document_text: documentText,
+		});
+
+		// Initialize the ChatOpenAI model
+		const model = new ChatOpenAI({
+			openAIApiKey: process.env.OPENAI_API_KEY,
+			modelName: 'gpt-3.5-turbo',
+			temperature: 0.8,
+		});
+
+		// Get the AI's response
+		const response = await model.predict(formattedPrompt);
+		const aiResponseContent = response;
+
+		// Extract the JavaScript code containing the data array from the response
+		const extractedData = extractJavascriptCode(aiResponseContent);
+		const formedData = transformDataStructure(extractedData, fileName);
+
+		// Extract dashboardData from formedData
+		const { dashboardData } = formedData;
+
+		if (!dashboardData) {
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res.status(400).json({ message: 'dashboardData is required' });
+		}
+
+		// Clean up uploaded file
+		fs.unlink(filePath, (err) => {
+			if (err) console.error('Error deleting file:', err);
+		});
+
+		// Return the dashboardData without updating the dashboard
+		res.status(200).json({ dashboardData });
+	} catch (error) {
+		console.error('Error processing document:', error);
+
+		// Clean up uploaded file in case of error
+		if (req.file) {
+			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+		}
+
+		res.status(500).json({ error: error.message });
+	}
+};

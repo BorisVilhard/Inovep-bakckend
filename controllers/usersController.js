@@ -2,24 +2,32 @@ import User from '../model/User.js';
 import bcrypt from 'bcrypt';
 
 export const getAllUsers = async (req, res) => {
-	const users = await User.find();
-	if (!users) return res.status(204).json({ message: 'No users found' });
-	res.json(users);
+	try {
+		const users = await User.find().select('-password');
+		if (!users) return res.status(204).json({ message: 'No users found' });
+		res.json(users);
+	} catch (error) {
+		console.error('Error fetching users:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
 };
 
-export const deleteUser = async (req, res) => {
-	const { id } = req.params; // Make sure you're pulling from params
-	if (!id) {
-		return res.status(400).json({ message: 'User ID required' });
+export const getUser = async (req, res) => {
+	const { id } = req.params;
+	if (!id) return res.status(400).json({ message: 'User ID required' });
+	try {
+		const user = await User.findOne({ _id: id }).select('-password').exec();
+		if (!user) {
+			return res.status(404).json({ message: `User ID ${id} not found` });
+		}
+		res.json(user);
+	} catch (error) {
+		console.error('Error fetching user:', error);
+		res.status(500).json({ message: 'Server error', error });
 	}
-	const user = await User.findById(id); // Use findById for simplicity
-	if (!user) {
-		return res.status(404).json({ message: `User ID ${id} not found` });
-	}
-	await user.remove(); // Using remove to delete the user
-	res.json({ message: 'User deleted successfully' });
 };
 
+// Update User
 export const updateUser = async (req, res) => {
 	const { id } = req.params;
 	const { username, email, password } = req.body;
@@ -40,20 +48,31 @@ export const updateUser = async (req, res) => {
 		user.email = email || user.email;
 
 		await user.save();
-		res.json({ message: 'User updated successfully!', user });
+		res.json({
+			message: 'User updated successfully!',
+			user: { username: user.username, email: user.email },
+		});
 	} catch (error) {
+		console.error('Error updating user:', error);
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
 
-export const getUser = async (req, res) => {
-	if (!req?.params?.id)
+// Delete User
+export const deleteUser = async (req, res) => {
+	const { id } = req.params;
+	if (!id) {
 		return res.status(400).json({ message: 'User ID required' });
-	const user = await User.findOne({ _id: req.params.id }).exec();
-	if (!user) {
-		return res
-			.status(204)
-			.json({ message: `User ID ${req.params.id} not found` });
 	}
-	res.json(user);
+	try {
+		const user = await User.findById(id);
+		if (!user) {
+			return res.status(404).json({ message: `User ID ${id} not found` });
+		}
+		await user.remove();
+		res.json({ message: 'User deleted successfully' });
+	} catch (error) {
+		console.error('Error deleting user:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
 };

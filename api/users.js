@@ -1,13 +1,33 @@
-const express = require('express');
+import express from 'express';
+import {
+	getUser,
+	updateUser,
+	deleteUser,
+	getAllUsers,
+} from '../../controllers/usersController.js';
+import {
+	forgotPassword,
+	verifyResetCode,
+	resetPassword,
+} from '../../controllers/forgotPassController.js';
+import verifyJWT from '../../middleware/verifyJWT.js';
+
 const router = express.Router();
-const usersController = require('../../controllers/usersController');
 
-router.route('/').get(usersController.getAllUsers);
+router.post('/forgot-password', forgotPassword);
 
-router
-	.route('/:id')
-	.get(usersController.getUser)
-	.put(usersController.updateUser)
-	.delete(usersController.deleteUser);
+router.post('/verify-code', verifyResetCode);
 
-module.exports = router;
+router.post('/reset-password', resetPassword);
+
+router.use(verifyJWT);
+
+router.get('/', getAllUsers);
+
+router.get('/:id', getUser);
+
+router.put('/:id', updateUser);
+
+router.delete('/:id', deleteUser);
+
+export default router;

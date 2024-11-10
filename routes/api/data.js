@@ -12,6 +12,7 @@ import {
 	createDashboard,
 	updateChartType,
 	updateCategoryData,
+	processFile,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
@@ -64,6 +65,13 @@ router.delete(
 	'/users/:id/dashboard/:dashboardId/file/:fileName',
 	verifyUserOwnership,
 	deleteDataByFileName
+);
+
+router.post(
+	'/users/:id/dashboard/processFile',
+	verifyUserOwnership,
+	upload.single('file'),
+	processFile
 );
 
 export default router;

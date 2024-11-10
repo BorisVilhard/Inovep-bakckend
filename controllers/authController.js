@@ -1,19 +1,18 @@
-// controllers/authController.js
 import User from '../model/User.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 
 export const handleLogin = async (req, res) => {
-	const { user, pwd } = req.body;
+	const { email, pwd } = req.body;
 
-	if (!user || !pwd) {
+	if (!email || !pwd) {
 		return res
 			.status(400)
 			.json({ message: 'Username and password are required.' });
 	}
 
 	try {
-		const foundUser = await User.findOne({ username: user }).exec();
+		const foundUser = await User.findOne({ email: email }).exec();
 		if (!foundUser) return res.sendStatus(401);
 
 		const match = await bcrypt.compare(pwd, foundUser.password);

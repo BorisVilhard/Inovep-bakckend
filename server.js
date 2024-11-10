@@ -19,7 +19,6 @@ import logoutRoutes from './routes/logout.js';
 import bodyParser from 'body-parser';
 import chatRoute from './routes/chat.js';
 import userRoutes from './routes/api/users.js';
-import documentProcessRoutes from './routes/documentProcess.js';
 import dataRoutes from './routes/api/data.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,19 +26,17 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3500;
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
 
 connectDB();
 
 app.use(logger);
-
 app.use(credentials);
-
 app.use(cors(corsOptions));
 
-app.use(express.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 app.use(cookieParser());
@@ -51,12 +48,12 @@ app.use('/register', registerRoutes);
 app.use('/auth', authRoutes);
 app.use('/refresh', refreshRoutes);
 app.use('/logout', logoutRoutes);
-
 app.use('/chat', chatRoute);
+app.use('/users', userRoutes);
 
+// Protect routes below with JWT
 app.use(verifyJWT);
 app.use('/data', dataRoutes);
-app.use('/users', userRoutes);
 
 app.all('*', (req, res) => {
 	res.status(404);
