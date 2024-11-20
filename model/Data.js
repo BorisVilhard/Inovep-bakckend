@@ -16,6 +16,7 @@ const validChartTypes = [
 	'Area',
 ];
 
+// Entry Schema
 const EntrySchema = new mongoose.Schema({
 	title: { type: String, required: true },
 	value: { type: mongoose.Schema.Types.Mixed, required: true },
@@ -23,6 +24,7 @@ const EntrySchema = new mongoose.Schema({
 	fileName: { type: String, required: true },
 });
 
+// IndexedEntries Schema
 const IndexedEntriesSchema = new mongoose.Schema({
 	id: { type: String, required: true },
 	chartType: { type: String, required: true, enum: validChartTypes },
@@ -31,17 +33,27 @@ const IndexedEntriesSchema = new mongoose.Schema({
 	fileName: { type: String, required: true },
 });
 
+// CombinedChart Schema
+const CombinedChartSchema = new mongoose.Schema({
+	id: { type: String, required: true, unique: true },
+	chartType: { type: String, required: true, enum: validChartTypes },
+	chartIds: { type: [String], required: true },
+	data: [EntrySchema],
+});
+
+// DashboardCategory Schema
 const DashboardCategorySchema = new mongoose.Schema({
 	categoryName: { type: String, required: true },
 	mainData: [IndexedEntriesSchema],
-	combinedData: { type: [IndexedEntriesSchema], default: [] },
-	summaryData: { type: [EntrySchema], default: [] }, // Add this line
+	combinedData: { type: [CombinedChartSchema], default: [] }, // Updated to use CombinedChartSchema
+	summaryData: { type: [EntrySchema], default: [] },
 	appliedChartType: { type: String, enum: validChartTypes },
 	checkedIds: { type: [String], default: [] },
 });
 
+// Dashboard Schema
 const DashboardSchema = new mongoose.Schema({
-	dashboardName: { type: String, required: true },
+	dashboardName: { type: String, required: true, unique: true },
 	dashboardData: [DashboardCategorySchema],
 	files: {
 		type: [

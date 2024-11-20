@@ -109,164 +109,6 @@ export const createDashboard = async (req, res) => {
 	}
 };
 
-// Upload a file and update or create a dashboard
-export const createOrUpdateDashboard = async (req, res) => {
-	try {
-		const userId = req.params.id;
-		const { dashboardId, dashboardName } = req.body;
-
-		if (!req.file) {
-			return res.status(400).json({ message: 'No file uploaded' });
-		}
-
-		const file = req.file;
-		const filePath = path.join(UPLOAD_FOLDER, file.filename);
-		const fileType = file.mimetype;
-		const fileName = file.originalname;
-
-		// Validate file type
-		const allowedTypes = [
-			'application/pdf',
-			'image/png',
-			'image/jpeg',
-			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-			'application/vnd.ms-excel',
-		];
-
-		if (!allowedTypes.includes(fileType)) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res.status(400).json({ message: 'Unsupported file type' });
-		}
-
-		// Extract text from the uploaded document
-		const documentText = await getDocumentText(filePath, fileType);
-
-		// Set up the prompt template
-		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
-
-Given the following text:
-{document_text}
-
-Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
-
-		// Initialize the prompt with the extracted document text
-		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
-		const formattedPrompt = await prompt.format({
-			document_text: documentText,
-		});
-
-		// Initialize the ChatOpenAI model
-		const model = new ChatOpenAI({
-			openAIApiKey: process.env.OPENAI_API_KEY,
-			modelName: 'gpt-3.5-turbo',
-			temperature: 0.8,
-		});
-
-		// Get the AI's response
-		const response = await model.predict(formattedPrompt);
-		const aiResponseContent = response;
-
-		// Extract the JavaScript code containing the data array from the response
-		const extractedData = extractJavascriptCode(aiResponseContent);
-		const formedData = transformDataStructure(extractedData, fileName);
-
-		// Extract dashboardData from formedData
-		const { dashboardData } = formedData;
-
-		if (!dashboardData) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res.status(400).json({ message: 'dashboardData is required' });
-		}
-
-		// Now store the file content into the files array
-		const fileData = {
-			filename: fileName,
-			content: dashboardData, // Store the processed data
-		};
-
-		let dashboard;
-		if (dashboardId) {
-			// Find existing dashboard
-			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
-			if (!dashboard) {
-				fs.unlink(filePath, (err) => {
-					if (err) console.error('Error deleting file:', err);
-				});
-				return res
-					.status(404)
-					.json({ message: `Dashboard ID ${dashboardId} not found` });
-			}
-
-			// Merge new data into existing dashboard
-			dashboard.dashboardData = mergeDashboardData(
-				dashboard.dashboardData,
-				dashboardData
-			);
-
-			// Add the file to the files array
-			dashboard.files.push(fileData);
-		} else if (dashboardName) {
-			// Create a new dashboard
-			// Check if dashboardName is unique
-			const existingDashboard = await Dashboard.findOne({
-				dashboardName,
-				userId,
-			});
-			if (existingDashboard) {
-				fs.unlink(filePath, (err) => {
-					if (err) console.error('Error deleting file:', err);
-				});
-				return res
-					.status(400)
-					.json({ message: 'Dashboard name already exists' });
-			}
-
-			dashboard = new Dashboard({
-				dashboardName,
-				dashboardData,
-				files: [fileData],
-				userId,
-			});
-		} else {
-			// No dashboardId or dashboardName provided
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res
-				.status(400)
-				.json({ message: 'dashboardId or dashboardName is required' });
-		}
-
-		await dashboard.save();
-
-		// Clean up uploaded file
-		fs.unlink(filePath, (err) => {
-			if (err) console.error('Error deleting file:', err);
-		});
-
-		res.status(201).json({
-			message: 'Dashboard processed successfully',
-			dashboard,
-		});
-	} catch (error) {
-		console.error('Error processing document and creating dashboard:', error);
-
-		// Clean up uploaded file in case of error
-		if (req.file) {
-			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-		}
-
-		res.status(500).json({ error: error.message });
-	}
-};
-
 // Update an existing dashboard
 export const updateDashboard = async (req, res) => {
 	const userId = req.params.id;
@@ -548,50 +390,6 @@ function transformDataStructure(data, fileName) {
 	return { dashboardData };
 }
 
-// Merge new dashboard data into existing dashboard data
-function mergeDashboardData(existingData, newData) {
-	const mergedData = [...existingData];
-
-	newData.forEach((newCategory) => {
-		const existingCategory = mergedData.find(
-			(cat) => cat.categoryName === newCategory.categoryName
-		);
-
-		if (existingCategory) {
-			newCategory.mainData.forEach((newChart) => {
-				const newChartId = newChart.id;
-
-				if (!newChartId) {
-					console.error('New chart is missing an id.');
-					return;
-				}
-
-				const existingChart = existingCategory.mainData.find(
-					(chart) => chart.id === newChartId
-				);
-
-				if (existingChart) {
-					// Check the type of value in newChart.data[0].value
-					const newValue = newChart.data[0]?.value;
-					if (typeof newValue === 'string') {
-						// Replace existing data with new data
-						existingChart.data = newChart.data;
-					} else {
-						// Merge data arrays
-						existingChart.data = [...existingChart.data, ...newChart.data];
-					}
-				} else {
-					existingCategory.mainData.push(newChart);
-				}
-			});
-		} else {
-			mergedData.push(newCategory);
-		}
-	});
-
-	return mergedData;
-}
-
 export const updateChartType = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, chartId } = req.params;
@@ -637,6 +435,8 @@ export const updateChartType = async (req, res) => {
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
+
+// controllers/dataController.js
 
 export const updateCategoryData = async (req, res) => {
 	const userId = req.params.id;
@@ -685,6 +485,415 @@ export const updateCategoryData = async (req, res) => {
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
+
+export const addCombinedChart = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId, categoryId } = req.params;
+	const { chartType, chartIds } = req.body;
+
+	if (
+		!chartType ||
+		!chartIds ||
+		!Array.isArray(chartIds) ||
+		chartIds.length < 2
+	) {
+		return res.status(400).json({
+			message:
+				'chartType and at least two chartIds are required to create a CombinedChart',
+		});
+	}
+
+	try {
+		// Find the dashboard
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res.status(404).json({ message: 'Dashboard not found' });
+		}
+
+		// Find the specific category
+		const category = dashboard.dashboardData.id(categoryId);
+		if (!category) {
+			return res.status(404).json({ message: 'Dashboard category not found' });
+		}
+
+		// Validate that chartIds exist in mainData
+		const validChartIds = category.mainData.map((chart) => chart.id);
+		const isValid = chartIds.every((id) => validChartIds.includes(id));
+		if (!isValid) {
+			return res
+				.status(400)
+				.json({ message: 'One or more chartIds are invalid' });
+		}
+
+		// Aggregate data from the selected chartIds
+		let aggregatedEntries = [];
+		category.mainData.forEach((chart) => {
+			if (chartIds.includes(chart.id)) {
+				aggregatedEntries = [...aggregatedEntries, ...chart.data];
+			}
+		});
+
+		const combinedChartId = `combined-${Date.now()}`;
+
+		// Create CombinedChart object
+		const combinedChart = {
+			id: combinedChartId,
+			chartType,
+			chartIds,
+			data: aggregatedEntries,
+		};
+
+		category.combinedData.push(combinedChart);
+
+		await dashboard.save();
+
+		res
+			.status(201)
+			.json({ message: 'CombinedChart created successfully', combinedChart });
+	} catch (error) {
+		console.error('Error adding CombinedChart:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+export const deleteCombinedChart = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId, categoryId, combinedChartId } = req.params;
+
+	try {
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res.status(404).json({ message: 'Dashboard not found' });
+		}
+
+		const category = dashboard.dashboardData.id(categoryId);
+		if (!category) {
+			return res.status(404).json({ message: 'Dashboard category not found' });
+		}
+
+		const combinedChart = category.combinedData.id(combinedChartId);
+		if (!combinedChart) {
+			return res.status(404).json({ message: 'CombinedChart not found' });
+		}
+
+		combinedChart.remove();
+
+		await dashboard.save();
+
+		res.status(200).json({ message: 'CombinedChart deleted successfully' });
+	} catch (error) {
+		console.error('Error deleting CombinedChart:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+// controllers/dataController.js
+
+// Update CombinedChart in a DashboardCategory
+export const updateCombinedChart = async (req, res) => {
+	const userId = req.params.id;
+	const { dashboardId, categoryId, combinedChartId } = req.params;
+	const { chartType, chartIds } = req.body; // Optional fields to update
+
+	try {
+		// Find the dashboard
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res.status(404).json({ message: 'Dashboard not found' });
+		}
+
+		// Find the specific category
+		const category = dashboard.dashboardData.id(categoryId);
+		if (!category) {
+			return res.status(404).json({ message: 'Dashboard category not found' });
+		}
+
+		// Find the CombinedChart
+		const combinedChart = category.combinedData.id(combinedChartId);
+		if (!combinedChart) {
+			return res.status(404).json({ message: 'CombinedChart not found' });
+		}
+
+		// Update chartType if provided
+		if (chartType) {
+			if (!validChartTypes.includes(chartType)) {
+				return res.status(400).json({ message: 'Invalid chartType' });
+			}
+			combinedChart.chartType = chartType;
+		}
+
+		// Update chartIds if provided
+		if (chartIds) {
+			if (!Array.isArray(chartIds) || chartIds.length < 2) {
+				return res
+					.status(400)
+					.json({ message: 'At least two chartIds are required' });
+			}
+
+			// Validate that new chartIds exist in mainData
+			const validChartIds = category.mainData.map((chart) => chart.id);
+			const isValid = chartIds.every((id) => validChartIds.includes(id));
+			if (!isValid) {
+				return res
+					.status(400)
+					.json({ message: 'One or more chartIds are invalid' });
+			}
+
+			// Update chartIds
+			combinedChart.chartIds = chartIds;
+
+			// Re-aggregate data based on new chartIds
+			let aggregatedEntries = [];
+			category.mainData.forEach((chart) => {
+				if (chartIds.includes(chart.id)) {
+					aggregatedEntries = [...aggregatedEntries, ...chart.data];
+				}
+			});
+			combinedChart.data = aggregatedEntries;
+		}
+
+		// Save the dashboard
+		await dashboard.save();
+
+		res
+			.status(200)
+			.json({ message: 'CombinedChart updated successfully', combinedChart });
+	} catch (error) {
+		console.error('Error updating CombinedChart:', error);
+		res.status(500).json({ message: 'Server error', error });
+	}
+};
+
+// controllers/dataController.js
+
+// Create or Update a Dashboard with CombinedChart Support
+export const createOrUpdateDashboard = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		const { dashboardId, dashboardName } = req.body;
+
+		if (!req.file) {
+			return res.status(400).json({ message: 'No file uploaded' });
+		}
+
+		const file = req.file;
+		const filePath = path.join(UPLOAD_FOLDER, file.filename);
+		const fileType = file.mimetype;
+		const fileName = file.originalname;
+
+		// Validate file type
+		const allowedTypes = [
+			'application/pdf',
+			'image/png',
+			'image/jpeg',
+			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			'application/vnd.ms-excel',
+		];
+
+		if (!allowedTypes.includes(fileType)) {
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res.status(400).json({ message: 'Unsupported file type' });
+		}
+
+		// Extract text from the uploaded document
+		const documentText = await getDocumentText(filePath, fileType);
+
+		// Set up the prompt template
+		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
+
+Given the following text:
+{document_text}
+
+Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
+
+		// Initialize the prompt with the extracted document text
+		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
+		const formattedPrompt = await prompt.format({
+			document_text: documentText,
+		});
+
+		// Initialize the ChatOpenAI model
+		const model = new ChatOpenAI({
+			openAIApiKey: process.env.OPENAI_API_KEY,
+			modelName: 'gpt-3.5-turbo',
+			temperature: 0.8,
+		});
+
+		// Get the AI's response
+		const response = await model.predict(formattedPrompt);
+		const aiResponseContent = response;
+
+		// Extract the JavaScript code containing the data array from the response
+		const extractedData = extractJavascriptCode(aiResponseContent);
+		const formedData = transformDataStructure(extractedData, fileName);
+
+		// Extract dashboardData from formedData
+		const { dashboardData } = formedData;
+
+		if (!dashboardData) {
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res.status(400).json({ message: 'dashboardData is required' });
+		}
+
+		// Now store the file content into the files array
+		const fileData = {
+			filename: fileName,
+			content: dashboardData, // Store the processed data
+		};
+
+		let dashboard;
+		if (dashboardId) {
+			// Find existing dashboard
+			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+			if (!dashboard) {
+				fs.unlink(filePath, (err) => {
+					if (err) console.error('Error deleting file:', err);
+				});
+				return res
+					.status(404)
+					.json({ message: `Dashboard ID ${dashboardId} not found` });
+			}
+
+			// Merge new data into existing dashboard
+			dashboard.dashboardData = mergeDashboardData(
+				dashboard.dashboardData,
+				dashboardData
+			);
+
+			// Add the file to the files array
+			dashboard.files.push(fileData);
+		} else if (dashboardName) {
+			// Create a new dashboard
+			// Check if dashboardName is unique
+			const existingDashboard = await Dashboard.findOne({
+				dashboardName,
+				userId,
+			});
+			if (existingDashboard) {
+				fs.unlink(filePath, (err) => {
+					if (err) console.error('Error deleting file:', err);
+				});
+				return res
+					.status(400)
+					.json({ message: 'Dashboard name already exists' });
+			}
+
+			dashboard = new Dashboard({
+				dashboardName,
+				dashboardData,
+				files: [fileData],
+				userId,
+			});
+		} else {
+			// No dashboardId or dashboardName provided
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res
+				.status(400)
+				.json({ message: 'dashboardId or dashboardName is required' });
+		}
+
+		await dashboard.save();
+
+		// Clean up uploaded file
+		fs.unlink(filePath, (err) => {
+			if (err) console.error('Error deleting file:', err);
+		});
+
+		res.status(201).json({
+			message: 'Dashboard processed successfully',
+			dashboard,
+		});
+	} catch (error) {
+		console.error('Error processing document and creating dashboard:', error);
+
+		// Clean up uploaded file in case of error
+		if (req.file) {
+			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+		}
+
+		res.status(500).json({ error: error.message });
+	}
+};
+
+// controllers/dataController.js
+
+function mergeDashboardData(existingData, newData) {
+	const mergedData = [...existingData];
+
+	newData.forEach((newCategory) => {
+		const existingCategory = mergedData.find(
+			(cat) => cat.categoryName === newCategory.categoryName
+		);
+
+		if (existingCategory) {
+			// Merge mainData
+			newCategory.mainData.forEach((newChart) => {
+				const existingChart = existingCategory.mainData.find(
+					(chart) => chart.id === newChart.id
+				);
+
+				if (existingChart) {
+					// Check the type of value in newChart.data[0].value
+					const newValue = newChart.data[0]?.value;
+					if (typeof newValue === 'string') {
+						// Replace existing data with new data
+						existingChart.data = newChart.data;
+					} else if (newChart.isChartTypeChanged) {
+						// Replace existing data and update chartType
+						existingChart.data = newChart.data;
+						existingChart.chartType = newChart.chartType;
+						existingChart.isChartTypeChanged = true;
+					} else {
+						// Merge data arrays
+						existingChart.data = [...existingChart.data, ...newChart.data];
+					}
+				} else {
+					existingCategory.mainData.push(newChart);
+				}
+			});
+
+			// Merge combinedData
+			if (newCategory.combinedData && newCategory.combinedData.length > 0) {
+				newCategory.combinedData.forEach((newCombinedChart) => {
+					const existingCombinedChart = existingCategory.combinedData.find(
+						(chart) => chart.id === newCombinedChart.id
+					);
+
+					if (existingCombinedChart) {
+						// Update if necessary
+						existingCombinedChart.chartType = newCombinedChart.chartType;
+						existingCombinedChart.chartIds = newCombinedChart.chartIds;
+						existingCombinedChart.data = newCombinedChart.data;
+					} else {
+						existingCategory.combinedData.push(newCombinedChart);
+					}
+				});
+			}
+
+			// Merge summaryData
+			if (newCategory.summaryData && newCategory.summaryData.length > 0) {
+				existingCategory.summaryData = [
+					...existingCategory.summaryData,
+					...newCategory.summaryData,
+				];
+			}
+		} else {
+			// Add new category
+			mergedData.push(newCategory);
+		}
+	});
+
+	return mergedData;
+}
 
 // controllers/dataController.js
 
