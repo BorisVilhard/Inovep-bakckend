@@ -9,7 +9,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
 import fs from 'fs';
 import path from 'path';
-
+import { mergeDashboardData } from '../utils/dashboardUtils.js';
 const UPLOAD_FOLDER = './uploads';
 
 function generateChartId(categoryName, chartTitle) {
@@ -826,77 +826,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 
 // controllers/dataController.js
 
-function mergeDashboardData(existingData, newData) {
-	const mergedData = [...existingData];
-
-	newData.forEach((newCategory) => {
-		const existingCategory = mergedData.find(
-			(cat) => cat.categoryName === newCategory.categoryName
-		);
-
-		if (existingCategory) {
-			// Merge mainData
-			newCategory.mainData.forEach((newChart) => {
-				const existingChart = existingCategory.mainData.find(
-					(chart) => chart.id === newChart.id
-				);
-
-				if (existingChart) {
-					// Check the type of value in newChart.data[0].value
-					const newValue = newChart.data[0]?.value;
-					if (typeof newValue === 'string') {
-						// Replace existing data with new data
-						existingChart.data = newChart.data;
-					} else if (newChart.isChartTypeChanged) {
-						// Replace existing data and update chartType
-						existingChart.data = newChart.data;
-						existingChart.chartType = newChart.chartType;
-						existingChart.isChartTypeChanged = true;
-					} else {
-						// Merge data arrays
-						existingChart.data = [...existingChart.data, ...newChart.data];
-					}
-				} else {
-					existingCategory.mainData.push(newChart);
-				}
-			});
-
-			// Merge combinedData
-			if (newCategory.combinedData && newCategory.combinedData.length > 0) {
-				newCategory.combinedData.forEach((newCombinedChart) => {
-					const existingCombinedChart = existingCategory.combinedData.find(
-						(chart) => chart.id === newCombinedChart.id
-					);
-
-					if (existingCombinedChart) {
-						// Update if necessary
-						existingCombinedChart.chartType = newCombinedChart.chartType;
-						existingCombinedChart.chartIds = newCombinedChart.chartIds;
-						existingCombinedChart.data = newCombinedChart.data;
-					} else {
-						existingCategory.combinedData.push(newCombinedChart);
-					}
-				});
-			}
-
-			// Merge summaryData
-			if (newCategory.summaryData && newCategory.summaryData.length > 0) {
-				existingCategory.summaryData = [
-					...existingCategory.summaryData,
-					...newCategory.summaryData,
-				];
-			}
-		} else {
-			// Add new category
-			mergedData.push(newCategory);
-		}
-	});
-
-	return mergedData;
-}
-
-// controllers/dataController.js
-
 export const processFile = async (req, res) => {
 	try {
 		const userId = req.params.id;
@@ -988,3 +917,282 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 		res.status(500).json({ error: error.message });
 	}
 };
+
+/**
+ * Removes lines that are empty or just a comma.
+ */
+function removeEmptyOrCommaLines(text) {
+	return text
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			// Keep only lines that are non-empty AND not just ","
+			return trimmed !== '' && trimmed !== ',';
+		})
+		.join('\n');
+}
+
+/**
+ * Limits consecutive identical lines to `MAX_REPEAT_COUNT`.
+ */
+function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
+	const lines = text.split('\n');
+	const cleanedLines = [];
+	let lastLine = null;
+	let repeatCount = 0;
+
+	for (const line of lines) {
+		if (line === lastLine) {
+			repeatCount++;
+			if (repeatCount <= MAX_REPEAT_COUNT) {
+				cleanedLines.push(line);
+			}
+		} else {
+			lastLine = line;
+			repeatCount = 1;
+			cleanedLines.push(line);
+		}
+	}
+	return cleanedLines.join('\n');
+}
+
+export const processCloudText = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		const { dashboardId } = req.params;
+		const { fullText, fileName } = req.body;
+
+		// Validate inputs
+		if (!fullText) {
+			return res.status(400).json({ message: 'No fullText provided' });
+		}
+		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+			return res.status(400).json({ message: 'Invalid dashboardId' });
+		}
+
+		// Fetch the Dashboard
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res.status(404).json({ message: 'Dashboard not found' });
+		}
+
+		// 1) Clean the incoming text
+		let cleanedText = removeEmptyOrCommaLines(fullText);
+		cleanedText = removeExcessiveRepetitions(cleanedText, 3);
+
+		// 2) Prepare the prompt for GPT
+		const TEMPLATE = `
+You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
+Don't add additional text or code.
+
+Given the following text:
+{document_text}
+
+Transform it into table data in one array of objects called 'data' in JavaScript.
+Provide only the JavaScript code, and ensure the code is valid JavaScript.
+    `.trim();
+
+		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
+		const formattedPrompt = await prompt.format({ document_text: cleanedText });
+
+		// 3) Initialize the ChatOpenAI model
+		const model = new ChatOpenAI({
+			openAIApiKey: process.env.OPENAI_API_KEY,
+			modelName: 'gpt-3.5-turbo',
+			temperature: 0.8,
+		});
+
+		// 4) Get GPT's response and extract the array data
+		const aiResponseContent = await model.predict(formattedPrompt);
+		const extractedData = extractJavascriptCode(aiResponseContent);
+
+		// Use any filename you wish. Here we default to "cloud_file."
+		// If you have the real file name from the frontend, pass it in your request body.
+
+		// Convert GPT's array into your DashboardCategory[] shape
+		const formedData = transformDataStructure(extractedData, fileName);
+		const { dashboardData: newDashboardData } = formedData;
+
+		if (!newDashboardData) {
+			return res
+				.status(400)
+				.json({ message: 'No valid dashboardData generated' });
+		}
+
+		// 5) Merge new data into the existing Dashboard
+		dashboard.dashboardData = mergeDashboardData(
+			dashboard.dashboardData,
+			newDashboardData
+		);
+
+		// 6) Add or replace the file content
+		// (You could remove old entries for "cloud_file" if you want to treat them as unique.)
+		dashboard.files.push({
+			filename: fileName,
+			content: newDashboardData,
+		});
+
+		// 7) Save the updated Dashboard document
+		await dashboard.save();
+
+		// 8) Return the updated dashboard
+		return res.status(200).json({
+			message: 'Cloud text processed and data stored successfully',
+			dashboard,
+		});
+	} catch (error) {
+		console.error('Error processing cloud text:', error);
+		return res.status(500).json({ error: error.message });
+	}
+};
+
+export const uploadCloudData = async (req, res) => {
+	try {
+		// 1. Gather inputs
+		const userId = req.params.id; // from /users/:id/...
+		const { dashboardId, dashboardName, fileName, dashboardData } = req.body;
+
+		// 2. Validate required fields
+		if (!fileName || !dashboardData) {
+			return res
+				.status(400)
+				.json({ message: 'fileName and dashboardData are required' });
+		}
+		if (!dashboardId && !dashboardName) {
+			return res
+				.status(400)
+				.json({ message: 'dashboardId or dashboardName is required' });
+		}
+
+		// 3. Find or create the Dashboard
+		let dashboard;
+		if (dashboardId) {
+			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+				return res.status(400).json({ message: 'Invalid dashboardId' });
+			}
+			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+			if (!dashboard) {
+				return res
+					.status(404)
+					.json({ message: `Dashboard ID ${dashboardId} not found` });
+			}
+		} else {
+			// No dashboardId => create new by name, if not existing
+			const existing = await Dashboard.findOne({ dashboardName, userId });
+			if (existing) {
+				return res.status(400).json({
+					message: `Dashboard name "${dashboardName}" already exists`,
+				});
+			}
+			dashboard = new Dashboard({
+				dashboardName,
+				userId,
+				dashboardData: [],
+				files: [],
+			});
+		}
+
+		// 4. Remove any old data for this same `fileName` if you want
+		// This ensures we don't keep duplicates from prior merges of the same fileName
+		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
+		dashboard.dashboardData.forEach((cat) => {
+			cat.mainData.forEach((chart) => {
+				chart.data = chart.data.filter((entry) => entry.fileName !== fileName);
+			});
+			// remove any chart w/ 0 data
+			cat.mainData = cat.mainData.filter((chart) => chart.data.length > 0);
+		});
+		// remove categories w/ 0 mainData
+		dashboard.dashboardData = dashboard.dashboardData.filter(
+			(cat) => cat.mainData.length > 0
+		);
+
+		// 5. Merge new data into the existing Dashboard
+		dashboard.dashboardData = mergeDashboardData(
+			dashboard.dashboardData,
+			dashboardData
+		);
+
+		// 6. Add the new file entry
+		dashboard.files.push({ filename: fileName, content: dashboardData });
+
+		// 7. Save
+		await dashboard.save();
+
+		// 8. Return updated Dashboard
+		return res.status(200).json({
+			message: 'Cloud data uploaded successfully',
+			dashboard,
+		});
+	} catch (error) {
+		console.error('Error in uploadCloudData:', error);
+		return res
+			.status(500)
+			.json({ message: 'Server error', error: error.message });
+	}
+};
+
+// // The same mergeDashboardData from your existing code:
+// function mergeDashboardData(existingData, newData) {
+// 	const mergedData = [...existingData];
+
+// 	newData.forEach((newCategory) => {
+// 		const existingCategory = mergedData.find(
+// 			(cat) => cat.categoryName === newCategory.categoryName
+// 		);
+
+// 		if (existingCategory) {
+// 			// Merge mainData
+// 			newCategory.mainData.forEach((newChart) => {
+// 				const existingChart = existingCategory.mainData.find(
+// 					(chart) => chart.id === newChart.id
+// 				);
+
+// 				if (existingChart) {
+// 					const newValue = newChart.data[0]?.value;
+// 					if (typeof newValue === 'string') {
+// 						existingChart.data = newChart.data;
+// 					} else if (newChart.isChartTypeChanged) {
+// 						existingChart.data = newChart.data;
+// 						existingChart.chartType = newChart.chartType;
+// 						existingChart.isChartTypeChanged = true;
+// 					} else {
+// 						// Merge data arrays
+// 						existingChart.data = [...existingChart.data, ...newChart.data];
+// 					}
+// 				} else {
+// 					existingCategory.mainData.push(newChart);
+// 				}
+// 			});
+
+// 			// Merge combinedData
+// 			if (newCategory.combinedData && newCategory.combinedData.length > 0) {
+// 				newCategory.combinedData.forEach((newCombinedChart) => {
+// 					const existingCombinedChart = existingCategory.combinedData.find(
+// 						(chart) => chart.id === newCombinedChart.id
+// 					);
+// 					if (existingCombinedChart) {
+// 						existingCombinedChart.chartType = newCombinedChart.chartType;
+// 						existingCombinedChart.chartIds = newCombinedChart.chartIds;
+// 						existingCombinedChart.data = newCombinedChart.data;
+// 					} else {
+// 						existingCategory.combinedData.push(newCombinedChart);
+// 					}
+// 				});
+// 			}
+
+// 			// Merge summaryData
+// 			if (newCategory.summaryData && newCategory.summaryData.length > 0) {
+// 				existingCategory.summaryData = [
+// 					...existingCategory.summaryData,
+// 					...newCategory.summaryData,
+// 				];
+// 			}
+// 		} else {
+// 			// Add new category
+// 			mergedData.push(newCategory);
+// 		}
+// 	});
+
+// 	return mergedData;
+// }

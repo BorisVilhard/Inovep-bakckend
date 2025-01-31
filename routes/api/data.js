@@ -1,35 +1,36 @@
-// routes/dashboardRoutes.js
+// routes/api/data.js
 
 import express from 'express';
 import multer from 'multer';
 import {
 	getAllDashboards,
 	getDashboardById,
+	createDashboard,
 	createOrUpdateDashboard,
 	updateDashboard,
 	deleteDashboard,
 	deleteDataByFileName,
 	verifyUserOwnership,
 	getDashboardFiles,
-	createDashboard,
 	updateChartType,
 	updateCategoryData,
 	processFile,
 	addCombinedChart,
 	deleteCombinedChart,
 	updateCombinedChart,
+	processCloudText,
+	uploadCloudData,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
 const router = express.Router();
-
 const upload = multer({ dest: 'uploads/' });
 
 // Apply JWT verification middleware to all routes
 router.use(verifyJWT);
 
 // Route to get all dashboards for a user
-router.route('/users/:id/dashboard').get(verifyUserOwnership, getAllDashboards);
+router.get('/users/:id/dashboard', verifyUserOwnership, getAllDashboards);
 
 // Route to create a new dashboard
 router.post(
@@ -44,6 +45,20 @@ router.post(
 	verifyUserOwnership,
 	upload.single('file'),
 	createOrUpdateDashboard
+);
+
+// NEW Route to process raw cloud text via GPT and store data
+router.post(
+	'/users/:id/dashboard/:dashboardId/cloudText',
+	verifyUserOwnership,
+	processCloudText
+);
+
+// Route to upload processed cloud data
+router.post(
+	'/users/:id/dashboard/uploadCloud',
+	verifyUserOwnership,
+	uploadCloudData
 );
 
 // Route to get all files associated with a dashboard
@@ -81,31 +96,25 @@ router.delete(
 	deleteDataByFileName
 );
 
-// Route to process a file (similar to upload)
+// Route to process a file (similar to upload) for local checking
 router.post(
-	'/users/:id/dashboard/processFile',
+	'/users/:id/dashboard/:dashboardId/processFile',
 	verifyUserOwnership,
 	upload.single('file'),
 	processFile
 );
 
-// **New Routes for CombinedChart Management**
-
-// Route to add a CombinedChart to a DashboardCategory
+// CombinedChart routes
 router.post(
 	'/users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart',
 	verifyUserOwnership,
 	addCombinedChart
 );
-
-// Route to delete a CombinedChart from a DashboardCategory
 router.delete(
 	'/users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart/:combinedChartId',
 	verifyUserOwnership,
 	deleteCombinedChart
 );
-
-// Route to update a CombinedChart in a DashboardCategory
 router.put(
 	'/users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart/:combinedChartId',
 	verifyUserOwnership,
