@@ -983,12 +983,11 @@ export const processCloudText = async (req, res) => {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
 
-		// 4. Clean the incoming text (optional but often helpful)
+		// 4. Clean the incoming text (optional)
 		let cleanedText = removeEmptyOrCommaLines(fullText);
 		cleanedText = removeExcessiveRepetitions(cleanedText, 3);
 
-		// 5. Build your GPT prompt (optional).
-		//    If you want to transform text using GPT, do so here. Example:
+		// 5. Build GPT prompt (optional, can skip if you already have structured data)
 		const TEMPLATE = `
 You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
 Don't add additional text or code.
@@ -998,13 +997,12 @@ Given the following text:
 
 Transform it into table data in one array of objects called 'data' in JavaScript.
 Provide only the JavaScript code, and ensure the code is valid JavaScript.
-    `.trim();
+		`.trim();
 
-		// 5a. Prepare the prompt
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({ document_text: cleanedText });
 
-		// 5b. Call GPT (assuming you have an OpenAI API key in your .env)
+		// 6. Call GPT to parse
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
@@ -1012,38 +1010,64 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 		});
 		const gptResponse = await model.predict(formattedPrompt);
 
-		// 6. Extract the JavaScript array from GPT’s response
+		// 7. Extract data from GPT response
 		const extractedData = extractJavascriptCode(gptResponse);
-		// => e.g. [ { Month: "Jan", Sales: 100 }, ... ]
-
-		// 7. Convert the array into your dashboard shape
 		const formedData = transformDataStructure(extractedData, fileName);
 		const { dashboardData: newDashboardData } = formedData;
+
 		if (!newDashboardData) {
 			return res
 				.status(400)
 				.json({ message: 'No valid dashboardData generated' });
 		}
 
-		// 8. Merge the new data with the existing Dashboard’s data
+		/**
+		 * 8. Remove old references if this fileName already exists
+		 *    in `dashboard.files` or in the mainData
+		 */
+		const existingFileIndex = dashboard.files.findIndex(
+			(f) => f.filename === fileName
+		);
+		if (existingFileIndex !== -1) {
+			// Remove the old file record
+			dashboard.files.splice(existingFileIndex, 1);
+
+			// Remove old entries from mainData
+			dashboard.dashboardData.forEach((category) => {
+				category.mainData.forEach((chart) => {
+					chart.data = chart.data.filter(
+						(entry) => entry.fileName !== fileName
+					);
+				});
+				// Remove empty charts
+				category.mainData = category.mainData.filter(
+					(chart) => chart.data.length > 0
+				);
+			});
+
+			// Remove categories that end up empty
+			dashboard.dashboardData = dashboard.dashboardData.filter(
+				(cat) => cat.mainData.length > 0
+			);
+		}
+
+		// 9. Merge new data into the existing dashboard
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			newDashboardData
 		);
 
-		// 9. Add a new record in the files[] array
-		//    (since fileId is required, generate one if you don’t have a real ID from Drive)
+		// 10. Add a new record in the files[] array
 		dashboard.files.push({
-			fileId: 'cloud-' + Date.now(),
+			fileId: 'cloud-' + Date.now(), // e.g. a synthetic ID
 			filename: fileName,
 			content: newDashboardData,
-			lastUpdate: new Date(), // or any Date you wish
+			lastUpdate: new Date(), // or any date
 		});
 
-		// 10. Save the updated Dashboard
+		// 11. Save and return
 		await dashboard.save();
 
-		// 11. Return the updated Dashboard
 		return res.status(200).json({
 			message: 'Cloud text processed and data stored successfully',
 			dashboard,
@@ -1073,8 +1097,7 @@ export const uploadCloudData = async (req, res) => {
 				.json({ message: 'dashboardId or dashboardName is required' });
 		}
 
-		// 3. Get a valid Google OAuth2 client for this user
-		//    (Or your service account client if your app uses a single "admin" approach)
+		// 3. Get a valid Google OAuth2 client for this user (for Drive calls)
 		const authClient = await getUserAuthClient(userId);
 		if (!authClient) {
 			return res
@@ -1118,33 +1141,47 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// 6. Remove old data for this same fileName/fileId if you want to avoid duplicates
-		dashboard.files = dashboard.files.filter((f) => f.fileId !== fileId);
-		dashboard.dashboardData.forEach((cat) => {
-			cat.mainData.forEach((chart) => {
-				chart.data = chart.data.filter((entry) => entry.fileName !== fileName);
-			});
-			// remove charts with zero data
-			cat.mainData = cat.mainData.filter((chart) => chart.data.length > 0);
-		});
-		// remove categories that have zero mainData
-		dashboard.dashboardData = dashboard.dashboardData.filter(
-			(cat) => cat.mainData.length > 0
+		/**
+		 * 6. Remove old references if there's a matching fileName
+		 *    or matching fileId (depends on your preference).
+		 *    This ensures we "replace" data instead of duplicating it.
+		 */
+		// Remove file by matching filename:
+		const existingFileIndex = dashboard.files.findIndex(
+			(f) => f.filename === fileName
 		);
+		if (existingFileIndex !== -1) {
+			dashboard.files.splice(existingFileIndex, 1);
 
-		// 7. Merge new data into existing Dashboard
+			// Remove old references from mainData
+			dashboard.dashboardData.forEach((cat) => {
+				cat.mainData.forEach((chart) => {
+					chart.data = chart.data.filter(
+						(entry) => entry.fileName !== fileName
+					);
+				});
+				cat.mainData = cat.mainData.filter((chart) => chart.data.length > 0);
+			});
+			dashboard.dashboardData = dashboard.dashboardData.filter(
+				(cat) => cat.mainData.length > 0
+			);
+		}
+
+		// (Optional) Also remove by fileId if you want strictly unique file IDs:
+		// dashboard.files = dashboard.files.filter((f) => f.fileId !== fileId);
+
+		// 7. Merge the new dashboardData
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
 
-		// 8. Add a new file record to the `files[]` array
-
+		// 8. Add the new file record
 		dashboard.files.push({
-			fileId: 'cloud-' + Date.now(), // you can create any unique ID
+			fileId: fileId, // or 'cloud-' + Date.now(), your call
 			filename: fileName,
-			content: newDashboardData,
-			lastUpdate: new Date(), // if you want a timestamp
+			content: dashboardData,
+			lastUpdate: lastUpdate || new Date(),
 		});
 
 		// 9. Save and return
