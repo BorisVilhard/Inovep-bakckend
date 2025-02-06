@@ -1,5 +1,4 @@
-// models/Data.js
-
+// model/Data.js
 import mongoose from 'mongoose';
 
 const validChartTypes = [
@@ -45,21 +44,23 @@ const CombinedChartSchema = new mongoose.Schema({
 const DashboardCategorySchema = new mongoose.Schema({
 	categoryName: { type: String, required: true },
 	mainData: [IndexedEntriesSchema],
-	combinedData: { type: [CombinedChartSchema], default: [] }, // Updated to use CombinedChartSchema
+	combinedData: { type: [CombinedChartSchema], default: [] },
 	summaryData: { type: [EntrySchema], default: [] },
 	appliedChartType: { type: String, enum: validChartTypes },
 	checkedIds: { type: [String], default: [] },
 });
 
-// Dashboard Schema
 const DashboardSchema = new mongoose.Schema({
 	dashboardName: { type: String, required: true, unique: true },
-	dashboardData: [DashboardCategorySchema],
+	dashboardData: [DashboardCategorySchema], // nested categories, same structure as user code
 	files: {
 		type: [
 			{
+				fileId: { type: String, required: true },
 				filename: { type: String, required: true },
 				content: [DashboardCategorySchema],
+				// IMPORTANT: lastUpdate field
+				lastUpdate: { type: Date },
 			},
 		],
 		default: [],
@@ -68,5 +69,4 @@ const DashboardSchema = new mongoose.Schema({
 });
 
 const Dashboard = mongoose.model('Dashboard', DashboardSchema);
-
 export default Dashboard;
