@@ -4,6 +4,7 @@ import {
 	setupFolderMonitoring,
 	handleNotification,
 	renewFileChannel,
+	stopFileMonitoring,
 } from '../controllers/monitorController.js';
 
 const router = express.Router();
@@ -12,6 +13,7 @@ const router = express.Router();
 router.post('/', setupFileMonitoring);
 router.post('/folder', setupFolderMonitoring);
 router.post('/renew', renewFileChannel);
+router.post('/stop', stopFileMonitoring);
 router.post('/notifications', handleNotification);
 
 export default router;

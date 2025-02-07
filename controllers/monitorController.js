@@ -11,22 +11,27 @@ import { getTokens, saveTokens } from '../tokenStore.js';
 let updateCounter = 0;
 let monitoredFolderId = null;
 let changesPageToken = null;
+
+// Tracks the last-known modifiedTime for each file.
 const fileModificationTimes = {};
 
 // Mapping files/folders to user IDs.
 const fileUserMapping = {}; // key: fileId, value: userId
 const folderUserMapping = {}; // key: folderId, value: userId
 
+// For storing watch channel info so we can call `drive.channels.stop()` later.
+// Key: fileId, Value: { channelId, resourceId }
+const channelMap = {};
+
 /**
- * Helper to extract a user ID from the request.
- * For interactive endpoints, we expect the frontend to send a valid user ID.
+ * Helper to extract a user ID from the request (depending on your auth strategy).
  */
 function getUserId(req) {
 	return req.user ? req.user.id : req.body.userId || req.query.userId;
 }
 
 /**
- * Helper to check if a given id is a valid ObjectId.
+ * Helper to check if a given id is a valid MongoDB ObjectId.
  */
 function isValidObjectId(id) {
 	return mongoose.Types.ObjectId.isValid(id);
@@ -50,8 +55,9 @@ function createOAuthClient(access_token, refresh_token, expiry_date) {
 }
 
 /**
- * Sets up monitoring for a single file in Drive.
+ * Sets up monitoring for a single file in Google Drive.
  * Expects { fileId, userId } in req.body.
+ * Immediately fetches & emits file content, then only re-emits if the file changes.
  */
 export async function setupFileMonitoring(req, res) {
 	try {
@@ -60,16 +66,16 @@ export async function setupFileMonitoring(req, res) {
 			return res.status(400).send('Missing fileId');
 		}
 
+		// Validate user
 		const userId = getUserId(req);
 		if (!userId) return res.status(401).send('User not authenticated');
 		if (!isValidObjectId(userId)) {
 			return res.status(400).send('Invalid user ID');
 		}
 
-		// Save the user mapping for this file.
 		fileUserMapping[fileId] = userId;
 
-		// Retrieve tokens for this user.
+		// Retrieve tokens
 		const tokens = await getTokens(userId);
 		if (!tokens || !tokens.access_token) {
 			return res
@@ -78,34 +84,43 @@ export async function setupFileMonitoring(req, res) {
 		}
 		const { access_token, refresh_token, expiry_date } = tokens;
 
-		// Create and initialize the OAuth2 client.
+		// Create OAuth client & refresh token if needed
 		const oauth2Client = createOAuthClient(
 			access_token,
 			refresh_token,
 			expiry_date
 		);
-		// Refresh the token if needed.
 		await oauth2Client.getAccessToken();
-		// Save any updated tokens.
 		await saveTokens(userId, oauth2Client.credentials);
 
 		const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-		// Set channel expiration to 7 days from now.
+		// Expire channel in 7 days
 		const expiration = Date.now() + 7 * 24 * 60 * 60 * 1000;
 
-		// Start watching the file – include the expiration parameter.
-		await drive.files.watch({
+		// Start watching the file
+		const watchResponse = await drive.files.watch({
 			fileId,
 			requestBody: {
-				id: `watch-${fileId}-${Date.now()}`,
+				id: `watch-${fileId}-${Date.now()}`, // Unique channel ID
 				type: 'web_hook',
 				address: `${process.env.BACKEND_URL}/api/monitor/notifications`,
 				expiration,
 			},
 		});
 
-		// Get the file's current modification time & name.
+		// Capture resource & channel IDs so we can stop later
+		const { resourceId, id: channelId } = watchResponse.data || {};
+		if (!resourceId || !channelId) {
+			console.warn(
+				'Missing resourceId or channelId in watch response:',
+				watchResponse.data
+			);
+		} else {
+			channelMap[fileId] = { resourceId, channelId };
+		}
+
+		// Retrieve file's current modifiedTime & name
 		const fileMeta = await drive.files.get({
 			fileId,
 			fields: 'modifiedTime, name',
@@ -114,11 +129,11 @@ export async function setupFileMonitoring(req, res) {
 			fileMeta.data.modifiedTime || new Date().toISOString();
 		const fileNameFromMeta = fileMeta.data.name || 'cloud_file';
 
-		// 1) Store the modification time in memory
+		// Store the last-known modified time
 		fileModificationTimes[fileId] = currentModifiedTime;
 
-		// 2) Immediately fetch & emit the file content so we have it right away:
-		const io = req.app.get('io'); // get the socket.io instance from app
+		// Immediately fetch & emit the current content
+		const io = req.app.get('io'); // your Socket.io instance
 		await fetchAndEmitFileContent(
 			fileId,
 			oauth2Client,
@@ -142,6 +157,8 @@ export async function setupFileMonitoring(req, res) {
 /**
  * Sets up monitoring for a folder in Drive.
  * Expects { folderId, userId } in req.body.
+ * Immediately fetches & emits content for each file in the folder,
+ * then only re-emits on subsequent changes.
  */
 export async function setupFolderMonitoring(req, res) {
 	try {
@@ -151,13 +168,13 @@ export async function setupFolderMonitoring(req, res) {
 		}
 		monitoredFolderId = folderId;
 
+		// Validate user
 		const userId = getUserId(req);
 		if (!userId) return res.status(401).send('User not authenticated');
 		if (!isValidObjectId(userId)) {
 			return res.status(400).send('Invalid user ID');
 		}
 
-		// Save the user mapping for this folder.
 		folderUserMapping[folderId] = userId;
 
 		const tokens = await getTokens(userId);
@@ -178,18 +195,18 @@ export async function setupFolderMonitoring(req, res) {
 
 		const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-		// 1) Retrieve & parse all existing files in the folder (fetch & emit them).
+		// 1) Retrieve & parse all existing files in the folder (fetch & emit them)
 		await retrieveAllFilesInFolder(folderId, drive, oauth2Client);
 
-		// 2) Get a start page token for changes.
+		// 2) Get a start page token for changes
 		const startPageTokenResp = await drive.changes.getStartPageToken();
 		changesPageToken = startPageTokenResp.data.startPageToken;
 		console.log('Start page token:', changesPageToken);
 
-		// Set channel expiration to 7 days from now.
+		// Expire channel in 7 days
 		const expiration = Date.now() + 7 * 24 * 60 * 60 * 1000;
 
-		// 3) Watch for changes with expiration.
+		// 3) Watch for folder-level changes
 		await drive.changes.watch({
 			pageToken: changesPageToken,
 			requestBody: {
@@ -200,7 +217,10 @@ export async function setupFolderMonitoring(req, res) {
 			},
 		});
 
-		console.log('Folder watch response:', { expiration });
+		console.log(
+			'Monitoring folder changes. Expires at:',
+			new Date(expiration).toLocaleString()
+		);
 		return res.status(200).json({
 			message: 'Monitoring started for folder',
 			folderId,
@@ -214,7 +234,8 @@ export async function setupFolderMonitoring(req, res) {
 }
 
 /**
- * Handles incoming push notifications from Google APIs.
+ * Google push notification handler endpoint.
+ * Google will POST notifications here when a file or folder changes.
  */
 export async function handleNotification(req, res) {
 	const io = req.app.get('io');
@@ -223,10 +244,10 @@ export async function handleNotification(req, res) {
 
 	try {
 		if (resourceUri.includes('/files/')) {
-			// Single-file notification.
+			// Single-file notification
 			await handleSingleFileNotification(resourceUri, io);
 		} else if (resourceUri.includes('/changes')) {
-			// Folder-level notification.
+			// Folder-level changes
 			await handleChangesNotification(io);
 		}
 	} catch (err) {
@@ -237,7 +258,7 @@ export async function handleNotification(req, res) {
 }
 
 /**
- * Endpoint to renew the file watch channel.
+ * Endpoint to renew the file watch channel before expiration.
  * Expects { fileId, userId } in req.body.
  */
 export async function renewFileChannel(req, res) {
@@ -267,7 +288,8 @@ export async function renewFileChannel(req, res) {
 		await saveTokens(userId, oauth2Client.credentials);
 
 		const drive = google.drive({ version: 'v3', auth: oauth2Client });
-		// Renew channel: new expiration 7 days from now.
+
+		// Renew channel: new expiration in 7 days
 		const expiration = Date.now() + 7 * 24 * 60 * 60 * 1000;
 		await drive.files.watch({
 			fileId,
@@ -279,7 +301,7 @@ export async function renewFileChannel(req, res) {
 			},
 		});
 
-		// Update mapping if necessary.
+		// Update mapping if necessary
 		fileUserMapping[fileId] = userId;
 
 		console.log(
@@ -300,29 +322,94 @@ export async function renewFileChannel(req, res) {
 	}
 }
 
+/**
+ * Stops monitoring for a specific file by calling `drive.channels.stop()`.
+ * Expects { fileId } in req.body.
+ */
+export async function stopFileMonitoring(req, res) {
+	try {
+		const { fileId } = req.body;
+		if (!fileId) {
+			return res.status(400).send('Missing fileId');
+		}
+
+		// Validate user
+		const userId = getUserId(req);
+		if (!userId) return res.status(401).send('User not authenticated');
+		if (!isValidObjectId(userId)) {
+			return res.status(400).send('Invalid user ID');
+		}
+
+		// Retrieve channel info
+		const channelInfo = channelMap[fileId];
+		if (!channelInfo) {
+			return res.status(404).send('No active channel found for this file');
+		}
+		const { resourceId, channelId } = channelInfo;
+
+		// Retrieve tokens & create OAuth client
+		const tokens = await getTokens(userId);
+		if (!tokens || !tokens.access_token) {
+			return res.status(401).send('No stored access token.');
+		}
+		const { access_token, refresh_token, expiry_date } = tokens;
+		const oauth2Client = createOAuthClient(
+			access_token,
+			refresh_token,
+			expiry_date
+		);
+		await oauth2Client.getAccessToken();
+		await saveTokens(userId, oauth2Client.credentials);
+
+		const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+		// Terminate the watch channel
+		await drive.channels.stop({
+			requestBody: {
+				id: channelId,
+				resourceId: resourceId,
+			},
+		});
+
+		// Clean up in-memory references so we no longer track this file
+		delete channelMap[fileId];
+		delete fileModificationTimes[fileId];
+		delete fileUserMapping[fileId];
+
+		return res.status(200).json({
+			message: `Stopped monitoring for file ${fileId}`,
+		});
+	} catch (error) {
+		console.error('Error stopping file monitoring:', error);
+		return res.status(500).send('Error stopping file monitoring');
+	}
+}
+
 /* -------------------------------
-   Helper Functions
+   Internal Helper Functions
 ---------------------------------*/
 
 /**
- * Handles a single-file change notification.
+ * Handles a single-file change notification from Google Drive.
+ * Only re-fetch if the file's `modifiedTime` changed.
  */
 async function handleSingleFileNotification(resourceUri, io) {
 	const match = resourceUri.match(/files\/([a-zA-Z0-9_-]+)/);
 	const fileId = match ? match[1] : null;
 	if (!fileId) return;
 
-	// Look up the user ID from the mapping.
+	// Look up the user ID from our in-memory map
 	const userId = fileUserMapping[fileId];
 	if (!userId) {
 		console.error(`No user mapping found for fileId: ${fileId}`);
 		return;
 	}
 	if (!isValidObjectId(userId)) {
-		console.error(`Invalid user ID provided for webhook: ${userId}`);
+		console.error(`Invalid user ID: ${userId}`);
 		return;
 	}
 
+	// Get tokens & create OAuth client
 	const tokens = await getTokens(userId);
 	if (!tokens || !tokens.access_token) return;
 
@@ -342,7 +429,7 @@ async function handleSingleFileNotification(resourceUri, io) {
 		const currentModifiedTime = fileMeta.data.modifiedTime;
 		const fileNameFromMeta = fileMeta.data.name || 'cloud_file';
 
-		// Only fetch & emit if the modifiedTime changed
+		// Only fetch & emit if `modifiedTime` changed
 		if (fileModificationTimes[fileId] !== currentModifiedTime) {
 			fileModificationTimes[fileId] = currentModifiedTime;
 			await fetchAndEmitFileContent(
@@ -357,28 +444,29 @@ async function handleSingleFileNotification(resourceUri, io) {
 		}
 	} catch (err) {
 		console.error(
-			`Error handling single file notification for fileId ${fileId}:`,
+			`Error handling file notification for fileId ${fileId}:`,
 			err.response?.data || err.message
 		);
 	}
 }
 
 /**
- * Handles a folder-level change notification.
+ * Handles folder-level change notifications via `drive.changes.list()`.
  */
 async function handleChangesNotification(io) {
 	if (!monitoredFolderId || !changesPageToken) {
-		console.log('No folder monitored or no pageToken');
+		console.log('No folder monitored or missing pageToken');
 		return;
 	}
 
+	// Identify the user who owns this folder
 	const userId = folderUserMapping[monitoredFolderId];
 	if (!userId) {
 		console.error(`No user mapping found for folderId: ${monitoredFolderId}`);
 		return;
 	}
 	if (!isValidObjectId(userId)) {
-		console.error(`Invalid user ID provided for webhook: ${userId}`);
+		console.error(`Invalid user ID: ${userId}`);
 		return;
 	}
 
@@ -417,17 +505,16 @@ async function handleChangesNotification(io) {
 				const currentModifiedTime = fileMeta.data.modifiedTime;
 				const fileNameFromMeta = fileMeta.data.name;
 
+				// If this file is in the monitored folder, check if we should re-fetch
 				if (parents.includes(monitoredFolderId)) {
-					if (
-						!fileModificationTimes[fileId] ||
-						fileModificationTimes[fileId] !== currentModifiedTime
-					) {
+					const prevModTime = fileModificationTimes[fileId] || null;
+					if (!prevModTime || prevModTime !== currentModifiedTime) {
 						fileModificationTimes[fileId] = currentModifiedTime;
 						await fetchAndEmitFileContent(
 							fileId,
 							oauth2Client,
 							io,
-							true, // emit globally for folder watchers
+							true,
 							fileNameFromMeta
 						);
 					} else {
@@ -442,6 +529,7 @@ async function handleChangesNotification(io) {
 			}
 		}
 
+		// Update pageToken for next time
 		if (changesResp.data.newStartPageToken) {
 			changesPageToken = changesResp.data.newStartPageToken;
 		} else if (changesResp.data.nextPageToken) {
@@ -449,19 +537,19 @@ async function handleChangesNotification(io) {
 		}
 	} catch (err) {
 		console.error(
-			'Error listing or processing changes:',
+			'Error processing folder changes:',
 			err.response?.data || err.message
 		);
 	}
 }
 
 /**
- * Retrieves all files in a folder and initializes their modification times
+ * Retrieves all files in a folder, initializes their modification times,
  * and immediately fetches & emits their content.
  */
 async function retrieveAllFilesInFolder(folderId, drive, oauth2Client) {
-	console.log('Retrieving all files in folder', folderId);
-	const io = null; // Or pass the real Socket.IO instance if you want immediate emission
+	console.log('Retrieving all files in folder:', folderId);
+	const io = null; // If you want immediate real-time broadcast, pass the real 'io'
 	let nextPageToken = null;
 
 	do {
@@ -474,13 +562,12 @@ async function retrieveAllFilesInFolder(folderId, drive, oauth2Client) {
 		const files = resp.data.files || [];
 		for (const f of files) {
 			fileModificationTimes[f.id] = f.modifiedTime;
-			// Immediately fetch content. If you want to broadcast to all clients,
-			// pass a real `io` and set `emitGlobally = true`.
+			// Immediately fetch & emit content
 			await fetchAndEmitFileContent(
 				f.id,
 				oauth2Client,
-				io, // pass actual 'io' if you want real-time folder broadcast
-				false,
+				io,
+				false, // or true if you want global emission
 				f.name || 'cloud_file'
 			);
 		}
@@ -489,8 +576,8 @@ async function retrieveAllFilesInFolder(folderId, drive, oauth2Client) {
 }
 
 /**
- * Fetches and emits file content from Drive.
- * Supports multiple file types (Google Docs, CSV, XLSX, Google Sheets, etc.).
+ * Fetches and emits file content via Socket.io.
+ * Handles Google Docs, CSV, XLSX, Google Sheets, etc.
  */
 async function fetchAndEmitFileContent(
 	fileId,
@@ -505,19 +592,24 @@ async function fetchAndEmitFileContent(
 			fileId,
 			fields: 'mimeType',
 		});
-		const { mimeType } = meta.data;
+		const mimeType = meta.data.mimeType;
 		let fileContent = '';
 
+		// 1) Google Docs => convert to plain text
 		if (mimeType === 'application/vnd.google-apps.document') {
 			const docs = google.docs({ version: 'v1', auth: oauth2Client });
 			const docResp = await docs.documents.get({ documentId: fileId });
 			fileContent = extractPlainText(docResp.data);
+
+			// 2) CSV => read text directly
 		} else if (mimeType === 'text/csv') {
 			const csvResp = await drive.files.get(
 				{ fileId, alt: 'media' },
 				{ responseType: 'arraybuffer' }
 			);
 			fileContent = Buffer.from(csvResp.data).toString('utf8');
+
+			// 3) XLSX => parse with XLSX library
 		} else if (
 			mimeType ===
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -536,20 +628,21 @@ async function fetchAndEmitFileContent(
 				allSheetsContent += `--- Sheet: ${sheetName} ---\n${csv}\n\n`;
 			});
 			fileContent = allSheetsContent.trim();
+
+			// 4) Google Sheets => export as CSV
 		} else if (mimeType === 'application/vnd.google-apps.spreadsheet') {
 			const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
 			const spreadsheet = await sheets.spreadsheets.get({
 				spreadsheetId: fileId,
 				fields: 'sheets(properties(title,sheetId))',
 			});
-			const sheetTitles = spreadsheet.data.sheets.map(
+			const sheetTitles = (spreadsheet.data.sheets || []).map(
 				(s) => s.properties.title
 			);
 			let allSheetsContent = '';
 			for (const title of sheetTitles) {
 				try {
-					// We'll export the entire spreadsheet as CSV
-					// (Note: if you wanted only a specific sheet, you can pass ranges)
+					// We export the entire spreadsheet as CSV
 					const csvResp = await drive.files.export(
 						{ fileId, mimeType: 'text/csv' },
 						{ responseType: 'arraybuffer' }
@@ -561,24 +654,29 @@ async function fetchAndEmitFileContent(
 						`Error exporting sheet "${title}" as CSV:`,
 						exportErr.response?.data || exportErr.message
 					);
-					continue;
 				}
 			}
 			fileContent = allSheetsContent.trim();
+
+			// 5) Folders => skip
 		} else if (mimeType === 'application/vnd.google-apps.folder') {
-			// Skip folders.
-			return;
+			return; // do nothing
+
+			// 6) Unsupported file type => just mention it
 		} else {
 			fileContent = `Unsupported or unhandled file type: ${mimeType}`;
 		}
 
+		// Clean up some noise like "Sheet:..." lines if desired
 		fileContent = removeSheetHeaders(fileContent);
+
+		// Increment update counter (just for demonstration logging)
 		updateCounter += 1;
 		console.log(
 			`Fetched content for file: ${actualFileName} (#${updateCounter})`
 		);
 
-		// If we have an `io` instance, emit an event with the text
+		// Emit via Socket.io if we have content and an io instance
 		if (io && fileContent) {
 			const eventPayload = {
 				fileId,
@@ -590,7 +688,7 @@ async function fetchAndEmitFileContent(
 			if (emitGlobally) {
 				io.emit('file-updated', eventPayload);
 			} else {
-				// If your client is joining a room = fileId
+				// If your frontend clients have joined a room == fileId
 				io.to(fileId).emit('file-updated', eventPayload);
 			}
 		}
@@ -626,7 +724,8 @@ function extractPlainText(doc) {
 }
 
 /**
- * Removes lines like `--- Sheet: SheetName ---` from the text.
+ * Removes lines like `--- Sheet: SomeSheet ---` from the text,
+ * if you want to strip out those headings from CSV merges.
  */
 function removeSheetHeaders(text) {
 	return text.replace(/^--- Sheet: .*? ---\r?\n?/gm, '').trim();
