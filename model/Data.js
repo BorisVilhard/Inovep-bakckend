@@ -56,7 +56,7 @@ const DashboardSchema = new mongoose.Schema({
 	files: {
 		type: [
 			{
-				fileId: { type: String, required: true },
+				fileId: { type: String },
 				filename: { type: String, required: true },
 				content: [DashboardCategorySchema],
 				// IMPORTANT: lastUpdate field

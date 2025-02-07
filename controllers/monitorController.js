@@ -105,12 +105,27 @@ export async function setupFileMonitoring(req, res) {
 			},
 		});
 
-		// Get the file's current modification time.
+		// Get the file's current modification time & name.
 		const fileMeta = await drive.files.get({
 			fileId,
 			fields: 'modifiedTime, name',
 		});
-		fileModificationTimes[fileId] = fileMeta.data.modifiedTime;
+		const currentModifiedTime =
+			fileMeta.data.modifiedTime || new Date().toISOString();
+		const fileNameFromMeta = fileMeta.data.name || 'cloud_file';
+
+		// 1) Store the modification time in memory
+		fileModificationTimes[fileId] = currentModifiedTime;
+
+		// 2) Immediately fetch & emit the file content so we have it right away:
+		const io = req.app.get('io'); // get the socket.io instance from app
+		await fetchAndEmitFileContent(
+			fileId,
+			oauth2Client,
+			io,
+			false,
+			fileNameFromMeta
+		);
 
 		return res.status(200).json({
 			message: 'Monitoring started for file',
@@ -163,7 +178,7 @@ export async function setupFolderMonitoring(req, res) {
 
 		const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-		// 1) Retrieve & parse all existing files in the folder.
+		// 1) Retrieve & parse all existing files in the folder (fetch & emit them).
 		await retrieveAllFilesInFolder(folderId, drive, oauth2Client);
 
 		// 2) Get a start page token for changes.
@@ -327,6 +342,7 @@ async function handleSingleFileNotification(resourceUri, io) {
 		const currentModifiedTime = fileMeta.data.modifiedTime;
 		const fileNameFromMeta = fileMeta.data.name || 'cloud_file';
 
+		// Only fetch & emit if the modifiedTime changed
 		if (fileModificationTimes[fileId] !== currentModifiedTime) {
 			fileModificationTimes[fileId] = currentModifiedTime;
 			await fetchAndEmitFileContent(
@@ -411,7 +427,7 @@ async function handleChangesNotification(io) {
 							fileId,
 							oauth2Client,
 							io,
-							true,
+							true, // emit globally for folder watchers
 							fileNameFromMeta
 						);
 					} else {
@@ -440,11 +456,14 @@ async function handleChangesNotification(io) {
 }
 
 /**
- * Retrieves all files in a folder and initializes their modification times.
+ * Retrieves all files in a folder and initializes their modification times
+ * and immediately fetches & emits their content.
  */
 async function retrieveAllFilesInFolder(folderId, drive, oauth2Client) {
 	console.log('Retrieving all files in folder', folderId);
+	const io = null; // Or pass the real Socket.IO instance if you want immediate emission
 	let nextPageToken = null;
+
 	do {
 		const resp = await drive.files.list({
 			q: `'${folderId}' in parents and trashed=false`,
@@ -455,10 +474,12 @@ async function retrieveAllFilesInFolder(folderId, drive, oauth2Client) {
 		const files = resp.data.files || [];
 		for (const f of files) {
 			fileModificationTimes[f.id] = f.modifiedTime;
+			// Immediately fetch content. If you want to broadcast to all clients,
+			// pass a real `io` and set `emitGlobally = true`.
 			await fetchAndEmitFileContent(
 				f.id,
 				oauth2Client,
-				null,
+				io, // pass actual 'io' if you want real-time folder broadcast
 				false,
 				f.name || 'cloud_file'
 			);
@@ -527,6 +548,8 @@ async function fetchAndEmitFileContent(
 			let allSheetsContent = '';
 			for (const title of sheetTitles) {
 				try {
+					// We'll export the entire spreadsheet as CSV
+					// (Note: if you wanted only a specific sheet, you can pass ranges)
 					const csvResp = await drive.files.export(
 						{ fileId, mimeType: 'text/csv' },
 						{ responseType: 'arraybuffer' }
@@ -555,6 +578,7 @@ async function fetchAndEmitFileContent(
 			`Fetched content for file: ${actualFileName} (#${updateCounter})`
 		);
 
+		// If we have an `io` instance, emit an event with the text
 		if (io && fileContent) {
 			const eventPayload = {
 				fileId,
@@ -566,6 +590,7 @@ async function fetchAndEmitFileContent(
 			if (emitGlobally) {
 				io.emit('file-updated', eventPayload);
 			} else {
+				// If your client is joining a room = fileId
 				io.to(fileId).emit('file-updated', eventPayload);
 			}
 		}
