@@ -29,12 +29,6 @@ router.post('/exchange-code', async (req, res) => {
 	if (!code) return res.status(400).json({ error: 'Missing auth code' });
 	if (!userId) return res.status(400).json({ error: 'Missing user ID' });
 
-	// Debug: Log the environment variables (remove these logs in production)
-	console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID);
-	console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET);
-	console.log('GOOGLE_REDIRECT_URI:', process.env.GOOGLE_REDIRECT_URI);
-	console.log('Received auth code:', code);
-
 	try {
 		const oauth2Client = new google.auth.OAuth2(
 			process.env.GOOGLE_CLIENT_ID,
@@ -46,23 +40,29 @@ router.post('/exchange-code', async (req, res) => {
 		const { tokens } = await oauth2Client.getToken(code);
 		console.log('Tokens received:', tokens);
 
-		// Save tokens to MongoDB for the given userId
-		await saveTokens(userId, tokens);
+		// If no refresh token is provided (common on repeat logins), merge the previously stored one
+		if (!tokens.refresh_token) {
+			const storedTokens = await getTokens(userId);
+			if (storedTokens && storedTokens.refresh_token) {
+				console.log('Merging previously saved refresh token.');
+				tokens.refresh_token = storedTokens.refresh_token;
+			}
+		}
 
+		// Save tokens to MongoDB
+		await saveTokens(userId, tokens);
 		return res
 			.status(200)
 			.json({ message: 'Tokens saved successfully', tokens });
 	} catch (error) {
 		console.error('Error exchanging code:', error);
-		if (error.response && error.response.data) {
-			console.error('Error details:', error.response.data);
-		}
 		return res.status(500).json({
 			error: 'Failed to exchange code',
 			details: error.response?.data || error.message,
 		});
 	}
 });
+
 
 /**
  * GET /auth/current-token

@@ -12,9 +12,13 @@ import path from 'path';
 import { mergeDashboardData } from '../utils/dashboardUtils.js';
 import { getGoogleDriveModifiedTime } from '../utils/googleDriveService.js';
 import { getUserAuthClient } from '../utils/oauthService.js';
+import { getTokens } from '../tokenStore.js';
 
 const UPLOAD_FOLDER = './uploads';
 
+/**
+ * Generates a chart ID based on the category and chart title.
+ */
 function generateChartId(categoryName, chartTitle) {
 	if (typeof categoryName !== 'string') {
 		console.error('categoryName is not a string:', categoryName);
@@ -24,24 +28,27 @@ function generateChartId(categoryName, chartTitle) {
 		console.error('chartTitle is not a string:', chartTitle);
 		chartTitle = String(chartTitle);
 	}
-
 	return `${categoryName.toLowerCase().replace(/\s+/g, '-')}-${chartTitle
 		.toLowerCase()
 		.replace(/\s+/g, '-')}`;
 }
 
-// Verify User Ownership Middleware
+/**
+ * Middleware: Verify that the user making the request owns the resource.
+ */
 export const verifyUserOwnership = (req, res, next) => {
 	const userIdFromToken = req.user.id;
 	const userIdFromParams = req.params.id;
-
 	if (userIdFromToken !== userIdFromParams) {
 		return res.status(403).json({ message: 'Access denied' });
 	}
 	next();
 };
 
-// Get all dashboards for a user
+/**
+ * GET /users/:id/dashboard
+ * Retrieves all dashboards for the given user.
+ */
 export const getAllDashboards = async (req, res) => {
 	const userId = req.params.id;
 	try {
@@ -55,15 +62,15 @@ export const getAllDashboards = async (req, res) => {
 	}
 };
 
-// Get a specific dashboard for a user
+/**
+ * GET /users/:id/dashboard/:dashboardId
+ * Retrieves a specific dashboard.
+ */
 export const getDashboardById = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId } = req.params;
 	try {
-		const dashboard = await Dashboard.findOne({
-			_id: dashboardId,
-			userId,
-		});
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res
 				.status(404)
@@ -75,17 +82,17 @@ export const getDashboardById = async (req, res) => {
 	}
 };
 
-// Create a new dashboard
+/**
+ * POST /users/:id/dashboard/create
+ * Creates a new dashboard.
+ */
 export const createDashboard = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardName } = req.body;
-
 	if (!dashboardName) {
 		return res.status(400).json({ message: 'dashboardName is required' });
 	}
-
 	try {
-		// Check if dashboardName is unique for the user
 		const existingDashboard = await Dashboard.findOne({
 			dashboardName,
 			userId,
@@ -93,16 +100,13 @@ export const createDashboard = async (req, res) => {
 		if (existingDashboard) {
 			return res.status(400).json({ message: 'Dashboard name already exists' });
 		}
-
 		const dashboard = new Dashboard({
 			dashboardName,
 			dashboardData: [],
 			files: [],
 			userId,
 		});
-
 		await dashboard.save();
-
 		res
 			.status(201)
 			.json({ message: 'Dashboard created successfully', dashboard });
@@ -112,18 +116,19 @@ export const createDashboard = async (req, res) => {
 	}
 };
 
-// Update an existing dashboard
+/**
+ * PUT /users/:id/dashboard/:dashboardId
+ * Updates an existing dashboard.
+ */
 export const updateDashboard = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId } = req.params;
 	const { dashboardData, dashboardName } = req.body;
-
 	if (!dashboardData && !dashboardName) {
 		return res
 			.status(400)
 			.json({ message: 'dashboardData or dashboardName is required' });
 	}
-
 	try {
 		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 			return res.status(400).json({ message: 'Invalid dashboard ID' });
@@ -134,8 +139,6 @@ export const updateDashboard = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
-		// If updating dashboardName, ensure it's unique
 		if (dashboardName && dashboardName !== dashboard.dashboardName) {
 			const existingDashboard = await Dashboard.findOne({
 				dashboardName,
@@ -148,12 +151,9 @@ export const updateDashboard = async (req, res) => {
 			}
 			dashboard.dashboardName = dashboardName;
 		}
-
-		// Update dashboardData if provided
 		if (dashboardData) {
 			dashboard.dashboardData = dashboardData;
 		}
-
 		await dashboard.save();
 		res.json({ message: 'Dashboard updated successfully', dashboard });
 	} catch (error) {
@@ -161,16 +161,16 @@ export const updateDashboard = async (req, res) => {
 	}
 };
 
-// Delete a dashboard
+/**
+ * DELETE /users/:id/dashboard/:dashboardId
+ * Deletes a dashboard.
+ */
 export const deleteDashboard = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId } = req.params;
-
-	// Validate dashboardId
 	if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 		return res.status(400).json({ message: 'Invalid dashboard ID' });
 	}
-
 	try {
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
@@ -178,7 +178,6 @@ export const deleteDashboard = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
 		await dashboard.deleteOne();
 		res.json({ message: 'Dashboard deleted successfully' });
 	} catch (error) {
@@ -187,16 +186,16 @@ export const deleteDashboard = async (req, res) => {
 	}
 };
 
-// Delete data associated with a specific fileName from a dashboard
+/**
+ * DELETE /users/:id/dashboard/:dashboardId/file/:fileName
+ * Removes data associated with a file from the dashboard.
+ */
 export const deleteDataByFileName = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, fileName } = req.params;
-
-	// Validate dashboardId
 	if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 		return res.status(400).json({ message: 'Invalid dashboard ID' });
 	}
-
 	try {
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
@@ -204,31 +203,24 @@ export const deleteDataByFileName = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
-		// Remove the file from the files array
+		// Remove file from files array
 		dashboard.files = dashboard.files.filter(
 			(file) => file.filename !== fileName
 		);
-
-		// Remove data from dashboardData associated with this file
+		// Remove data points matching the fileName from each chart
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData = category.mainData.filter((chart) => {
-				// Remove data points from chart.data that have matching fileName
 				chart.data = chart.data.filter(
 					(dataPoint) => dataPoint.fileName !== fileName
 				);
-				// Remove chart if no data points left
 				return chart.data.length > 0;
 			});
 		});
-
-		// Remove categories that have no mainData left
+		// Remove empty categories
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
-
 		await dashboard.save();
-
 		res.json({ message: 'Data deleted successfully', dashboard });
 	} catch (error) {
 		console.error('Error deleting data:', error);
@@ -236,21 +228,20 @@ export const deleteDataByFileName = async (req, res) => {
 	}
 };
 
-// Get all files associated with a dashboard
+/**
+ * GET /users/:id/dashboard/:dashboardId/files
+ * Retrieves an array of file names associated with the dashboard.
+ */
 export const getDashboardFiles = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId } = req.params;
 	try {
-		const dashboard = await Dashboard.findOne({
-			_id: dashboardId,
-			userId,
-		});
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
 		const files = dashboard.files.map((file) => file.filename);
 		res.json({ files });
 	} catch (error) {
@@ -258,7 +249,9 @@ export const getDashboardFiles = async (req, res) => {
 	}
 };
 
-// Function to extract text from different document types
+/**
+ * Extracts text from a document based on its type.
+ */
 const getDocumentText = async (filePath, fileType) => {
 	let text = '';
 	if (fileType === 'application/pdf') {
@@ -298,12 +291,13 @@ const getDocumentText = async (filePath, fileType) => {
 	}
 };
 
-// Function to extract JavaScript code from AI response
+/**
+ * Extracts a JavaScript array from an AI response string.
+ */
 function extractJavascriptCode(response) {
 	try {
 		const jsCodePattern = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
 		const match = response.match(jsCodePattern);
-
 		if (match) {
 			let jsArrayString = match[1];
 			jsArrayString = jsArrayString.replace(/\/\/.*/g, '');
@@ -321,7 +315,9 @@ function extractJavascriptCode(response) {
 	}
 }
 
-// Function to clean numeric values in strings
+/**
+ * Cleans a string value by extracting numeric content.
+ */
 function cleanNumeric(value) {
 	if (typeof value === 'string') {
 		const numMatch = value.match(/-?\d+(\.\d+)?/);
@@ -333,16 +329,16 @@ function cleanNumeric(value) {
 	return value;
 }
 
+/**
+ * Transforms the extracted data into the dashboard data structure.
+ */
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
 	const today = format(new Date(), 'yyyy-MM-dd');
-
 	data.forEach((item) => {
 		const groupNameKey = Object.keys(item)[0];
 		let monthName = item[groupNameKey];
 		delete item[groupNameKey];
-
-		// Convert monthName to string if it's not
 		if (typeof monthName !== 'string') {
 			console.warn(
 				'monthName is not a string. Converting to string.',
@@ -350,11 +346,9 @@ function transformDataStructure(data, fileName) {
 			);
 			monthName = String(monthName);
 		}
-
 		if (monthName) {
 			const charts = [];
 			for (const [key, value] of Object.entries(item)) {
-				// Ensure key is a string
 				let chartTitle = key;
 				if (typeof chartTitle !== 'string') {
 					console.warn(
@@ -363,10 +357,8 @@ function transformDataStructure(data, fileName) {
 					);
 					chartTitle = String(chartTitle);
 				}
-
 				const cleanedValue = cleanNumeric(value);
 				const chartId = generateChartId(monthName, chartTitle);
-
 				charts.push({
 					chartType: 'Area',
 					id: chartId,
@@ -389,19 +381,20 @@ function transformDataStructure(data, fileName) {
 			});
 		}
 	});
-
 	return { dashboardData };
 }
 
+/**
+ * PUT /users/:id/dashboard/:dashboardId/chart/:chartId
+ * Updates the chart type for a specific chart.
+ */
 export const updateChartType = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, chartId } = req.params;
 	const { chartType } = req.body;
-
 	if (!chartType) {
 		return res.status(400).json({ message: 'chartType is required' });
 	}
-
 	try {
 		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 			return res.status(400).json({ message: 'Invalid dashboard ID' });
@@ -412,9 +405,7 @@ export const updateChartType = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
 		let chartFound = false;
-
 		for (let category of dashboard.dashboardData) {
 			for (let chart of category.mainData) {
 				if (chart.id === chartId) {
@@ -426,11 +417,9 @@ export const updateChartType = async (req, res) => {
 			}
 			if (chartFound) break;
 		}
-
 		if (!chartFound) {
 			return res.status(404).json({ message: `Chart ID ${chartId} not found` });
 		}
-
 		await dashboard.save();
 		res.json({ message: 'ChartType updated successfully', dashboard });
 	} catch (error) {
@@ -439,13 +428,14 @@ export const updateChartType = async (req, res) => {
 	}
 };
 
-// controllers/dataController.js
-
+/**
+ * PUT /users/:id/dashboard/:dashboardId/category/:categoryName
+ * Updates a dashboard category’s data.
+ */
 export const updateCategoryData = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryName } = req.params;
 	const { combinedData, summaryData, appliedChartType, checkedIds } = req.body;
-
 	try {
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
@@ -453,35 +443,27 @@ export const updateCategoryData = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-
 		const category = dashboard.dashboardData.find(
 			(cat) => cat.categoryName === categoryName
 		);
-
 		if (!category) {
 			return res
 				.status(404)
 				.json({ message: `Category ${categoryName} not found` });
 		}
-
 		if (combinedData) {
 			category.combinedData = combinedData;
 		}
-
 		if (summaryData) {
 			category.summaryData = summaryData;
 		}
-
 		if (appliedChartType) {
 			category.appliedChartType = appliedChartType;
 		}
-
 		if (checkedIds) {
 			category.checkedIds = checkedIds;
 		}
-
 		await dashboard.save();
-
 		res.json({ message: 'Category data updated successfully', dashboard });
 	} catch (error) {
 		console.error('Error updating category data:', error);
@@ -489,11 +471,14 @@ export const updateCategoryData = async (req, res) => {
 	}
 };
 
+/**
+ * POST /users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart
+ * Creates a CombinedChart by aggregating data from multiple charts.
+ */
 export const addCombinedChart = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryId } = req.params;
 	const { chartType, chartIds } = req.body;
-
 	if (
 		!chartType ||
 		!chartIds ||
@@ -505,21 +490,18 @@ export const addCombinedChart = async (req, res) => {
 				'chartType and at least two chartIds are required to create a CombinedChart',
 		});
 	}
-
 	try {
-		// Find the dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
-
-		// Find the specific category
-		const category = dashboard.dashboardData.id(categoryId);
+		// Here, we assume that categoryId is equivalent to categoryName.
+		const category = dashboard.dashboardData.find(
+			(cat) => cat.categoryName === categoryId
+		);
 		if (!category) {
 			return res.status(404).json({ message: 'Dashboard category not found' });
 		}
-
-		// Validate that chartIds exist in mainData
 		const validChartIds = category.mainData.map((chart) => chart.id);
 		const isValid = chartIds.every((id) => validChartIds.includes(id));
 		if (!isValid) {
@@ -527,29 +509,21 @@ export const addCombinedChart = async (req, res) => {
 				.status(400)
 				.json({ message: 'One or more chartIds are invalid' });
 		}
-
-		// Aggregate data from the selected chartIds
 		let aggregatedEntries = [];
 		category.mainData.forEach((chart) => {
 			if (chartIds.includes(chart.id)) {
 				aggregatedEntries = [...aggregatedEntries, ...chart.data];
 			}
 		});
-
 		const combinedChartId = `combined-${Date.now()}`;
-
-		// Create CombinedChart object
 		const combinedChart = {
 			id: combinedChartId,
 			chartType,
 			chartIds,
 			data: aggregatedEntries,
 		};
-
 		category.combinedData.push(combinedChart);
-
 		await dashboard.save();
-
 		res
 			.status(201)
 			.json({ message: 'CombinedChart created successfully', combinedChart });
@@ -559,30 +533,32 @@ export const addCombinedChart = async (req, res) => {
 	}
 };
 
+/**
+ * DELETE /users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart/:combinedChartId
+ * Deletes a CombinedChart.
+ */
 export const deleteCombinedChart = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryId, combinedChartId } = req.params;
-
 	try {
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
-
-		const category = dashboard.dashboardData.id(categoryId);
+		const category = dashboard.dashboardData.find(
+			(cat) => cat.categoryName === categoryId
+		);
 		if (!category) {
 			return res.status(404).json({ message: 'Dashboard category not found' });
 		}
-
-		const combinedChart = category.combinedData.id(combinedChartId);
-		if (!combinedChart) {
+		const index = category.combinedData.findIndex(
+			(chart) => chart.id === combinedChartId
+		);
+		if (index === -1) {
 			return res.status(404).json({ message: 'CombinedChart not found' });
 		}
-
-		combinedChart.remove();
-
+		category.combinedData.splice(index, 1);
 		await dashboard.save();
-
 		res.status(200).json({ message: 'CombinedChart deleted successfully' });
 	} catch (error) {
 		console.error('Error deleting CombinedChart:', error);
@@ -590,50 +566,40 @@ export const deleteCombinedChart = async (req, res) => {
 	}
 };
 
-// controllers/dataController.js
-
-// Update CombinedChart in a DashboardCategory
+/**
+ * PUT /users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart/:combinedChartId
+ * Updates an existing CombinedChart.
+ */
 export const updateCombinedChart = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryId, combinedChartId } = req.params;
-	const { chartType, chartIds } = req.body; // Optional fields to update
-
+	const { chartType, chartIds } = req.body;
 	try {
-		// Find the dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
-
-		// Find the specific category
-		const category = dashboard.dashboardData.id(categoryId);
+		const category = dashboard.dashboardData.find(
+			(cat) => cat.categoryName === categoryId
+		);
 		if (!category) {
 			return res.status(404).json({ message: 'Dashboard category not found' });
 		}
-
-		// Find the CombinedChart
-		const combinedChart = category.combinedData.id(combinedChartId);
+		const combinedChart = category.combinedData.find(
+			(chart) => chart.id === combinedChartId
+		);
 		if (!combinedChart) {
 			return res.status(404).json({ message: 'CombinedChart not found' });
 		}
-
-		// Update chartType if provided
 		if (chartType) {
-			if (!validChartTypes.includes(chartType)) {
-				return res.status(400).json({ message: 'Invalid chartType' });
-			}
 			combinedChart.chartType = chartType;
 		}
-
-		// Update chartIds if provided
 		if (chartIds) {
 			if (!Array.isArray(chartIds) || chartIds.length < 2) {
 				return res
 					.status(400)
 					.json({ message: 'At least two chartIds are required' });
 			}
-
-			// Validate that new chartIds exist in mainData
 			const validChartIds = category.mainData.map((chart) => chart.id);
 			const isValid = chartIds.every((id) => validChartIds.includes(id));
 			if (!isValid) {
@@ -641,11 +607,7 @@ export const updateCombinedChart = async (req, res) => {
 					.status(400)
 					.json({ message: 'One or more chartIds are invalid' });
 			}
-
-			// Update chartIds
 			combinedChart.chartIds = chartIds;
-
-			// Re-aggregate data based on new chartIds
 			let aggregatedEntries = [];
 			category.mainData.forEach((chart) => {
 				if (chartIds.includes(chart.id)) {
@@ -654,10 +616,7 @@ export const updateCombinedChart = async (req, res) => {
 			});
 			combinedChart.data = aggregatedEntries;
 		}
-
-		// Save the dashboard
 		await dashboard.save();
-
 		res
 			.status(200)
 			.json({ message: 'CombinedChart updated successfully', combinedChart });
@@ -667,24 +626,21 @@ export const updateCombinedChart = async (req, res) => {
 	}
 };
 
-// controllers/dataController.js
-
-// Create or Update a Dashboard with CombinedChart Support
+/**
+ * POST /users/:id/dashboard/upload
+ * Uploads a file and creates or updates a dashboard with the processed file data.
+ */
 export const createOrUpdateDashboard = async (req, res) => {
 	try {
 		const userId = req.params.id;
 		const { dashboardId, dashboardName } = req.body;
-
 		if (!req.file) {
 			return res.status(400).json({ message: 'No file uploaded' });
 		}
-
 		const file = req.file;
 		const filePath = path.join(UPLOAD_FOLDER, file.filename);
 		const fileType = file.mimetype;
 		const fileName = file.originalname;
-
-		// Validate file type
 		const allowedTypes = [
 			'application/pdf',
 			'image/png',
@@ -692,65 +648,47 @@ export const createOrUpdateDashboard = async (req, res) => {
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 			'application/vnd.ms-excel',
 		];
-
 		if (!allowedTypes.includes(fileType)) {
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 			return res.status(400).json({ message: 'Unsupported file type' });
 		}
-
-		// Extract text from the uploaded document
+		// Extract text from the file
 		const documentText = await getDocumentText(filePath, fileType);
-
-		// Set up the prompt template
 		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
 
 Given the following text:
 {document_text}
 
 Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
-
-		// Initialize the prompt with the extracted document text
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({
 			document_text: documentText,
 		});
-
-		// Initialize the ChatOpenAI model
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
 		});
-
-		// Get the AI's response
 		const response = await model.predict(formattedPrompt);
 		const aiResponseContent = response;
-
-		// Extract the JavaScript code containing the data array from the response
 		const extractedData = extractJavascriptCode(aiResponseContent);
 		const formedData = transformDataStructure(extractedData, fileName);
-
-		// Extract dashboardData from formedData
 		const { dashboardData } = formedData;
-
 		if (!dashboardData) {
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
-
-		// Now store the file content into the files array
+		// Prepare file record
 		const fileData = {
 			filename: fileName,
-			content: dashboardData, // Store the processed data
+			content: dashboardData,
 		};
-
 		let dashboard;
 		if (dashboardId) {
-			// Find existing dashboard
 			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 			if (!dashboard) {
 				fs.unlink(filePath, (err) => {
@@ -760,18 +698,13 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 					.status(404)
 					.json({ message: `Dashboard ID ${dashboardId} not found` });
 			}
-
-			// Merge new data into existing dashboard
+			// Merge new data with existing dashboardData
 			dashboard.dashboardData = mergeDashboardData(
 				dashboard.dashboardData,
 				dashboardData
 			);
-
-			// Add the file to the files array
 			dashboard.files.push(fileData);
 		} else if (dashboardName) {
-			// Create a new dashboard
-			// Check if dashboardName is unique
 			const existingDashboard = await Dashboard.findOne({
 				dashboardName,
 				userId,
@@ -784,7 +717,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 					.status(400)
 					.json({ message: 'Dashboard name already exists' });
 			}
-
 			dashboard = new Dashboard({
 				dashboardName,
 				dashboardData,
@@ -792,7 +724,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 				userId,
 			});
 		} else {
-			// No dashboardId or dashboardName provided
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
@@ -800,48 +731,39 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 				.status(400)
 				.json({ message: 'dashboardId or dashboardName is required' });
 		}
-
 		await dashboard.save();
-
-		// Clean up uploaded file
 		fs.unlink(filePath, (err) => {
 			if (err) console.error('Error deleting file:', err);
 		});
-
-		res.status(201).json({
-			message: 'Dashboard processed successfully',
-			dashboard,
-		});
+		res
+			.status(201)
+			.json({ message: 'Dashboard processed successfully', dashboard });
 	} catch (error) {
 		console.error('Error processing document and creating dashboard:', error);
-
-		// Clean up uploaded file in case of error
 		if (req.file) {
 			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 		}
-
 		res.status(500).json({ error: error.message });
 	}
 };
 
-// controllers/dataController.js
-
+/**
+ * POST /users/:id/dashboard/:dashboardId/processFile
+ * Processes a file and returns the extracted dashboard data without saving.
+ */
 export const processFile = async (req, res) => {
 	try {
 		const userId = req.params.id;
 		if (!req.file) {
 			return res.status(400).json({ message: 'No file uploaded' });
 		}
-
 		const file = req.file;
 		const filePath = path.join(UPLOAD_FOLDER, file.filename);
 		const fileType = file.mimetype;
 		const fileName = file.originalname;
-
-		// Validate file type
 		const allowedTypes = [
 			'application/pdf',
 			'image/png',
@@ -849,101 +771,76 @@ export const processFile = async (req, res) => {
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 			'application/vnd.ms-excel',
 		];
-
 		if (!allowedTypes.includes(fileType)) {
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 			return res.status(400).json({ message: 'Unsupported file type' });
 		}
-
-		// Extract text from the uploaded document
 		const documentText = await getDocumentText(filePath, fileType);
-
-		// Set up the prompt template
 		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
 
 Given the following text:
 {document_text}
 
 Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
-
-		// Initialize the prompt with the extracted document text
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({
 			document_text: documentText,
 		});
-
-		// Initialize the ChatOpenAI model
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
 		});
-
-		// Get the AI's response
 		const response = await model.predict(formattedPrompt);
 		const aiResponseContent = response;
-
-		// Extract the JavaScript code containing the data array from the response
 		const extractedData = extractJavascriptCode(aiResponseContent);
 		const formedData = transformDataStructure(extractedData, fileName);
-
-		// Extract dashboardData from formedData
 		const { dashboardData } = formedData;
-
 		if (!dashboardData) {
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
-
-		// Clean up uploaded file
 		fs.unlink(filePath, (err) => {
 			if (err) console.error('Error deleting file:', err);
 		});
-
-		// Return the dashboardData without updating the dashboard
 		res.status(200).json({ dashboardData });
 	} catch (error) {
 		console.error('Error processing document:', error);
-
-		// Clean up uploaded file in case of error
 		if (req.file) {
 			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
 		}
-
 		res.status(500).json({ error: error.message });
 	}
 };
 
 /**
- * Removes lines that are empty or just a comma.
+ * Utility: Removes lines that are empty or just a comma.
  */
 function removeEmptyOrCommaLines(text) {
 	return text
 		.split('\n')
 		.filter((line) => {
 			const trimmed = line.trim();
-			// Keep only lines that are non-empty AND not just ","
 			return trimmed !== '' && trimmed !== ',';
 		})
 		.join('\n');
 }
 
 /**
- * Limits consecutive identical lines to `MAX_REPEAT_COUNT`.
+ * Utility: Limits consecutive identical lines.
  */
 function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
 	const lines = text.split('\n');
 	const cleanedLines = [];
 	let lastLine = null;
 	let repeatCount = 0;
-
 	for (const line of lines) {
 		if (line === lastLine) {
 			repeatCount++;
@@ -959,14 +856,15 @@ function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
 	return cleanedLines.join('\n');
 }
 
+/**
+ * POST /users/:id/dashboard/:dashboardId/cloudText
+ * Processes raw cloud text (e.g. from Google Drive) using GPT, merges the data, and updates the dashboard.
+ */
 export const processCloudText = async (req, res) => {
 	try {
-		// 1. Destructure params and body
 		const userId = req.params.id;
 		const { dashboardId } = req.params;
 		const { fullText, fileName } = req.body;
-
-		// 2. Validate input
 		if (!fullText) {
 			return res.status(400).json({ message: 'No fullText provided' });
 		}
@@ -976,18 +874,12 @@ export const processCloudText = async (req, res) => {
 		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 			return res.status(400).json({ message: 'Invalid dashboardId' });
 		}
-
-		// 3. Fetch the user’s dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
-
-		// 4. Clean the incoming text (optional)
 		let cleanedText = removeEmptyOrCommaLines(fullText);
 		cleanedText = removeExcessiveRepetitions(cleanedText, 3);
-
-		// 5. Build GPT prompt (optional, can skip if you already have structured data)
 		const TEMPLATE = `
 You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
 Don't add additional text or code.
@@ -997,96 +889,83 @@ Given the following text:
 
 Transform it into table data in one array of objects called 'data' in JavaScript.
 Provide only the JavaScript code, and ensure the code is valid JavaScript.
-		`.trim();
-
+    `.trim();
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({ document_text: cleanedText });
-
-		// 6. Call GPT to parse
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
 		});
 		const gptResponse = await model.predict(formattedPrompt);
-
-		// 7. Extract data from GPT response
 		const extractedData = extractJavascriptCode(gptResponse);
 		const formedData = transformDataStructure(extractedData, fileName);
-		const { dashboardData: newDashboardData } = formedData;
-
-		if (!newDashboardData) {
-			return res
-				.status(400)
-				.json({ message: 'No valid dashboardData generated' });
+		const { dashboardData } = formedData;
+		if (!dashboardData) {
+			return res.status(400).json({ message: 'dashboardData is required' });
 		}
-
-		/**
-		 * 8. Remove old references if this fileName already exists
-		 *    in `dashboard.files` or in the mainData
-		 */
-		const existingFileIndex = dashboard.files.findIndex(
-			(f) => f.filename === fileName
-		);
-		if (existingFileIndex !== -1) {
-			// Remove the old file record
-			dashboard.files.splice(existingFileIndex, 1);
-
-			// Remove old entries from mainData
-			dashboard.dashboardData.forEach((category) => {
-				category.mainData.forEach((chart) => {
-					chart.data = chart.data.filter(
-						(entry) => entry.fileName !== fileName
-					);
-				});
-				// Remove empty charts
-				category.mainData = category.mainData.filter(
-					(chart) => chart.data.length > 0
-				);
+		// Remove old file references from the dashboard
+		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
+		dashboard.dashboardData.forEach((category) => {
+			category.mainData.forEach((chart) => {
+				chart.data = chart.data.filter((entry) => entry.fileName !== fileName);
 			});
-
-			// Remove categories that end up empty
-			dashboard.dashboardData = dashboard.dashboardData.filter(
-				(cat) => cat.mainData.length > 0
+			category.mainData = category.mainData.filter(
+				(chart) => chart.data.length > 0
 			);
-		}
-
-		// 9. Merge new data into the existing dashboard
+		});
+		dashboard.dashboardData = dashboard.dashboardData.filter(
+			(category) => category.mainData.length > 0
+		);
+		// Merge the new dashboard data
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
-			newDashboardData
+			dashboardData
 		);
-
-		// 10. Add a new record in the files[] array
-		dashboard.files.push({
-			fileId: 'cloud-' + Date.now(), // e.g. a synthetic ID
+		const fileData = {
+			fileId: 'cloud-' + Date.now(),
 			filename: fileName,
-			content: newDashboardData,
-			lastUpdate: new Date(), // or any date
-		});
-
-		// 11. Save and return
+			content: dashboardData,
+			lastUpdate: new Date(),
+		};
+		dashboard.files.push(fileData);
 		await dashboard.save();
-
-		return res.status(200).json({
+		res.status(201).json({
 			message: 'Cloud text processed and data stored successfully',
 			dashboard,
 		});
 	} catch (error) {
 		console.error('Error processing cloud text:', error);
-		return res.status(500).json({ error: error.message });
+		return res
+			.status(500)
+			.json({ message: 'Server error', error: error.message });
 	}
 };
 
+/**
+ * POST /users/:id/dashboard/uploadCloud
+ * Uploads pre-processed cloud data to update or create a dashboard.
+ */
 export const uploadCloudData = async (req, res) => {
 	try {
-		// 1. Gather inputs
-		const userId = req.params.id; // from /users/:id/...
-		const { dashboardId, dashboardName, fileId, fileName, dashboardData } =
-			req.body;
+		const userId = req.params.id;
+		// Destructure the payload; note that fileId may not be provided.
+		const { dashboardId, dashboardName, fileName, dashboardData } = req.body;
+		let { fileId } = req.body;
 
-		// 2. Validate required fields
-		if (!fileId || !fileName || !dashboardData) {
+		// If fileId is missing, use a fallback (here, the fileName)
+		if (!fileId) {
+			fileId = fileName;
+		}
+
+		// Validate required parameters.
+		// Also check that dashboardData is an array with at least one element.
+		if (
+			!fileId ||
+			!fileName ||
+			!dashboardData ||
+			(Array.isArray(dashboardData) && dashboardData.length === 0)
+		) {
 			return res.status(400).json({
 				message: 'fileId, fileName, and dashboardData are required',
 			});
@@ -1097,28 +976,55 @@ export const uploadCloudData = async (req, res) => {
 				.json({ message: 'dashboardId or dashboardName is required' });
 		}
 
-		// 3. Get a valid Google OAuth2 client for this user (for Drive calls)
-		const authClient = await getUserAuthClient(userId);
+		// Retrieve the stored tokens for the user.
+		const tokens = await getTokens(userId);
+		if (!tokens || !tokens.access_token) {
+			return res
+				.status(401)
+				.json({ message: 'No valid tokens found for user' });
+		}
+
+		// Create an authenticated OAuth2 client using the stored tokens.
+		const authClient = await getUserAuthClient(
+			tokens.access_token,
+			tokens.refresh_token,
+			tokens.expiry_date
+		);
 		if (!authClient) {
 			return res
 				.status(401)
 				.json({ message: 'Could not get authenticated client' });
 		}
 
-		// 4. Fetch the Drive file’s lastUpdate (modifiedTime)
-		const modifiedTimeStr = await getGoogleDriveModifiedTime(
-			fileId,
-			authClient
-		);
-		const lastUpdate = modifiedTimeStr ? new Date(modifiedTimeStr) : undefined;
+		// Only attempt to fetch the file's modified time if fileId is valid.
+		// If fileId equals fileName (our fallback), then skip the Drive call.
+		let lastUpdate;
+		if (fileId && fileId !== fileName) {
+			try {
+				const modifiedTimeStr = await getGoogleDriveModifiedTime(
+					fileId,
+					authClient
+				);
+				lastUpdate = modifiedTimeStr ? new Date(modifiedTimeStr) : new Date();
+			} catch (driveError) {
+				// If fetching the modified time fails, log the error and use the current date.
+				console.warn(
+					'Failed to fetch modified time, using current date:',
+					driveError.message
+				);
+				lastUpdate = new Date();
+			}
+		} else {
+			lastUpdate = new Date();
+		}
 
-		// 5. Find or create the Dashboard
 		let dashboard;
 		if (dashboardId) {
-			// If user wants to add/merge data into existing dashboard
+			// Validate the dashboardId format.
 			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 				return res.status(400).json({ message: 'Invalid dashboardId' });
 			}
+			// Look up the dashboard by its ID and the userId.
 			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 			if (!dashboard) {
 				return res
@@ -1126,7 +1032,7 @@ export const uploadCloudData = async (req, res) => {
 					.json({ message: `Dashboard ID ${dashboardId} not found` });
 			}
 		} else {
-			// No dashboardId => try creating new by name
+			// Create a new dashboard if one does not exist by name.
 			const existing = await Dashboard.findOne({ dashboardName, userId });
 			if (existing) {
 				return res.status(400).json({
@@ -1141,52 +1047,42 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		/**
-		 * 6. Remove old references if there's a matching fileName
-		 *    or matching fileId (depends on your preference).
-		 *    This ensures we "replace" data instead of duplicating it.
-		 */
-		// Remove file by matching filename:
+		// Remove any existing file data with the same fileName from the dashboard.
 		const existingFileIndex = dashboard.files.findIndex(
 			(f) => f.filename === fileName
 		);
 		if (existingFileIndex !== -1) {
 			dashboard.files.splice(existingFileIndex, 1);
-
-			// Remove old references from mainData
-			dashboard.dashboardData.forEach((cat) => {
-				cat.mainData.forEach((chart) => {
+			dashboard.dashboardData.forEach((category) => {
+				category.mainData.forEach((chart) => {
 					chart.data = chart.data.filter(
 						(entry) => entry.fileName !== fileName
 					);
 				});
-				cat.mainData = cat.mainData.filter((chart) => chart.data.length > 0);
+				category.mainData = category.mainData.filter(
+					(chart) => chart.data.length > 0
+				);
 			});
 			dashboard.dashboardData = dashboard.dashboardData.filter(
-				(cat) => cat.mainData.length > 0
+				(category) => category.mainData.length > 0
 			);
 		}
 
-		// (Optional) Also remove by fileId if you want strictly unique file IDs:
-		// dashboard.files = dashboard.files.filter((f) => f.fileId !== fileId);
-
-		// 7. Merge the new dashboardData
+		// Merge the new dashboard data with any existing data.
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
 
-		// 8. Add the new file record
+		// Add the new file record.
 		dashboard.files.push({
-			fileId: fileId, // or 'cloud-' + Date.now(), your call
+			fileId,
 			filename: fileName,
 			content: dashboardData,
-			lastUpdate: lastUpdate || new Date(),
+			lastUpdate: lastUpdate,
 		});
 
-		// 9. Save and return
 		await dashboard.save();
-
 		return res.status(200).json({
 			message: 'Cloud data uploaded successfully',
 			dashboard,

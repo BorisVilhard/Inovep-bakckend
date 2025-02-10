@@ -179,7 +179,7 @@ export const createOrUpdateChat = async (req, res) => {
 		// Initialize the model
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
-			modelName: 'gpt-3.5-turbo',
+			modelName: 'gpt-4-turbo',
 			temperature: 0.8,
 		});
 
