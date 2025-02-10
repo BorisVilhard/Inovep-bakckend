@@ -953,13 +953,12 @@ export const uploadCloudData = async (req, res) => {
 		const { dashboardId, dashboardName, fileName, dashboardData } = req.body;
 		let { fileId } = req.body;
 
-		// If fileId is missing, use a fallback (here, the fileName)
+		// If fileId is missing, use fileName as a fallback.
 		if (!fileId) {
 			fileId = fileName;
 		}
 
 		// Validate required parameters.
-		// Also check that dashboardData is an array with at least one element.
 		if (
 			!fileId ||
 			!fileName ||
@@ -996,8 +995,7 @@ export const uploadCloudData = async (req, res) => {
 				.json({ message: 'Could not get authenticated client' });
 		}
 
-		// Only attempt to fetch the file's modified time if fileId is valid.
-		// If fileId equals fileName (our fallback), then skip the Drive call.
+		// If fileId is valid (i.e. not the fallback value), try to get the modified time.
 		let lastUpdate;
 		if (fileId && fileId !== fileName) {
 			try {
@@ -1007,7 +1005,6 @@ export const uploadCloudData = async (req, res) => {
 				);
 				lastUpdate = modifiedTimeStr ? new Date(modifiedTimeStr) : new Date();
 			} catch (driveError) {
-				// If fetching the modified time fails, log the error and use the current date.
 				console.warn(
 					'Failed to fetch modified time, using current date:',
 					driveError.message
@@ -1018,13 +1015,12 @@ export const uploadCloudData = async (req, res) => {
 			lastUpdate = new Date();
 		}
 
+		// Retrieve the dashboard document.
 		let dashboard;
 		if (dashboardId) {
-			// Validate the dashboardId format.
 			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 				return res.status(400).json({ message: 'Invalid dashboardId' });
 			}
-			// Look up the dashboard by its ID and the userId.
 			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 			if (!dashboard) {
 				return res
@@ -1047,32 +1043,23 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// Remove any existing file data with the same fileName from the dashboard.
+		// Log the merging process for debugging.
+		console.log('Existing dashboardData:', dashboard.dashboardData);
+		console.log('New dashboardData:', dashboardData);
+		const mergedData = mergeDashboardData(
+			dashboard.dashboardData,
+			dashboardData
+		);
+		console.log('Merged dashboardData:', mergedData);
+		dashboard.dashboardData = mergedData;
+
+		// Remove any existing file record with the same fileName.
 		const existingFileIndex = dashboard.files.findIndex(
 			(f) => f.filename === fileName
 		);
 		if (existingFileIndex !== -1) {
 			dashboard.files.splice(existingFileIndex, 1);
-			dashboard.dashboardData.forEach((category) => {
-				category.mainData.forEach((chart) => {
-					chart.data = chart.data.filter(
-						(entry) => entry.fileName !== fileName
-					);
-				});
-				category.mainData = category.mainData.filter(
-					(chart) => chart.data.length > 0
-				);
-			});
-			dashboard.dashboardData = dashboard.dashboardData.filter(
-				(category) => category.mainData.length > 0
-			);
 		}
-
-		// Merge the new dashboard data with any existing data.
-		dashboard.dashboardData = mergeDashboardData(
-			dashboard.dashboardData,
-			dashboardData
-		);
 
 		// Add the new file record.
 		dashboard.files.push({
