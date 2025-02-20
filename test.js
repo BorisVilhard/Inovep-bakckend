@@ -1,113 +1,148 @@
-import { format } from 'date-fns';
+import { mergeDashboardData } from './utils/dashboardUtils.js';
 
-// Function to extract JavaScript code containing array declarations from the response string
-function extractJavascriptCode(response) {
-	try {
-		// Regex pattern to match JavaScript array declarations
-		const jsCodePattern = /const\s+\w+\s*=\s*\[.*?\];/s;
-		const match = response.match(jsCodePattern);
-
-		if (match) {
-			let jsArrayString = match[0];
-			// Remove any comments from the JavaScript code
-			jsArrayString = jsArrayString.replace(/\/\/.*/g, '');
-			// Extract the array portion from the JavaScript declaration
-			let jsonLikeString = jsArrayString.substring(
-				jsArrayString.indexOf('['),
-				jsArrayString.lastIndexOf(']') + 1
-			);
-			// Convert JavaScript object notation to JSON format
-			jsonLikeString = jsonLikeString.replace(/(\w+):/g, '"$1":');
-			jsonLikeString = jsonLikeString.replace(/'/g, '"');
-			// Handle JavaScript null and undefined values
-			jsonLikeString = jsonLikeString.replace(/\b(null|undefined)\b/g, 'null');
-			// Remove trailing commas before array closures
-			jsonLikeString = jsonLikeString.replace(/,\s*\]/g, ']');
-			// Parse the cleaned string into JSON
-			return JSON.parse(jsonLikeString);
-		} else {
-			return [];
-		}
-	} catch (error) {
-		console.error('Error decoding JSON:', error);
-		return [];
-	}
-}
-
-// Function to clean numeric values in strings and convert to appropriate data type
-function cleanNumeric(value) {
-	if (typeof value === 'string') {
-		// Search for numeric patterns including optional negative signs and decimals
-		const numMatch = value.match(/-?\d+(\.\d+)?/);
-		if (numMatch) {
-			const numStr = numMatch[0];
-			// Convert to float if it contains a decimal point, otherwise to int
-			return numStr.includes('.') ? parseFloat(numStr) : parseInt(numStr, 10);
-		}
-	}
-	return value;
-}
-
-// Function to transform data structure
-function transformDataStructure(data) {
-	const result = [];
-	const today = format(new Date(), 'yyyy-MM-dd');
-	let idCounter = 1; // Initialize ID counter
-
-	data.forEach((item) => {
-		// Dynamically identify the group name key, assuming it is the first key in the item.
-		const groupNameKey = Object.keys(item)[0];
-		const name = item[groupNameKey];
-		delete item[groupNameKey];
-
-		if (name) {
-			const pokemonData = [];
-			for (const [key, value] of Object.entries(item)) {
-				const cleanedValue = cleanNumeric(value);
-				pokemonData.push({
-					chartType: 'Area',
-					id: idCounter, // Assign ID
-					data: [
-						{
-							title: key,
-							value: cleanedValue,
-							date: today,
-						},
-					],
-				});
-				idCounter += 1; // Increment ID counter
-			}
-			result.push({ [name]: pokemonData });
-		}
-	});
-
-	// Wrapping the result in the desired format
-	const finalOutput = { DashboardId: 1, dashboardData: result };
-
-	return finalOutput; // Return the final output in the desired format
-}
-
-// Example response text containing JavaScript data
-const responseText = `
-const data = [
-    {"Month": "January", "Profit ($)": 8994},
-    {"Month": "February", "Profit ($)": 4688},
-    {"Month": "March", "Profit ($)": 14513},
-    {"Month": "April", "Profit ($)": 18288},
-    {"Month": "May", "Profit ($)": 9400},
-    {"Month": "June", "Profit ($)": 14261},
-    {"Month": "July", "Profit ($)": 14115},
-    {"Month": "August", "Profit ($)": 10061},
-    {"Month": "September", "Profit ($)": 4447},
-    {"Month": "October", "Profit ($)": 9542},
-    {"Month": "November", "Profit ($)": 6610},
-    {"Month": "December", "Profit ($)": 4498}
+const existingData = [
+	{
+		categoryName: 'Sales',
+		mainData: [
+			{
+				id: 'chart1',
+				chartType: 'Bar',
+				data: [
+					{
+						title: 'Q1',
+						value: 5000,
+						date: '2023-01-01',
+						fileName: 'sales.csv',
+					},
+					{
+						title: 'Q2',
+						value: 7000,
+						date: '2023-04-01',
+						fileName: 'sales.csv',
+					},
+				],
+				isChartTypeChanged: false,
+				fileName: 'sales.csv',
+			},
+		],
+		combinedData: [
+			{
+				id: 'combinedChart1',
+				chartType: 'Line',
+				chartIds: ['chart1'],
+				data: [
+					{
+						title: 'Q1',
+						value: 5000,
+						date: '2023-01-01',
+						fileName: 'sales.csv',
+					},
+					{
+						title: 'Q2',
+						value: 7000,
+						date: '2023-04-01',
+						fileName: 'sales.csv',
+					},
+				],
+			},
+		],
+		summaryData: [
+			{
+				title: 'Total Sales',
+				value: 12000,
+				date: '2023-06-01',
+				fileName: 'sales.csv',
+			},
+		],
+	},
 ];
-`;
 
-// Extract and transform the data
-const extractedData = extractJavascriptCode(responseText);
-const formedData = transformDataStructure(extractedData);
+const newData = [
+	{
+		categoryName: 'Sales',
+		mainData: [
+			{
+				id: 'chart1',
+				chartType: 'Bar',
+				data: [
+					{
+						title: 'Q3',
+						value: 8000,
+						date: '2023-07-01',
+						fileName: 'sales_updated.csv',
+					},
+				],
+				isChartTypeChanged: false,
+				fileName: 'sales_updated.csv',
+			},
+			{
+				id: 'chart2',
+				chartType: 'Line',
+				data: [
+					{
+						title: 'Q1',
+						value: 6000,
+						date: '2023-01-01',
+						fileName: 'sales_updated.csv',
+					},
+				],
+				isChartTypeChanged: false,
+				fileName: 'sales_updated.csv',
+			},
+		],
+		combinedData: [
+			{
+				id: 'combinedChart1',
+				chartType: 'Line',
+				chartIds: ['chart1', 'chart2'],
+				data: [
+					{
+						title: 'Q1',
+						value: 6000,
+						date: '2023-01-01',
+						fileName: 'sales_updated.csv',
+					},
+				],
+			},
+		],
+		summaryData: [
+			{
+				title: 'Total Sales',
+				value: 20000,
+				date: '2023-09-01',
+				fileName: 'sales_updated.csv',
+			},
+		],
+	},
+	{
+		categoryName: 'Marketing',
+		mainData: [
+			{
+				id: 'chart3',
+				chartType: 'Pie',
+				data: [
+					{
+						title: 'Campaign A',
+						value: 3000,
+						date: '2023-06-01',
+						fileName: 'marketing.csv',
+					},
+				],
+				isChartTypeChanged: false,
+				fileName: 'marketing.csv',
+			},
+		],
+		combinedData: [],
+		summaryData: [
+			{
+				title: 'Total Spend',
+				value: 5000,
+				date: '2023-06-01',
+				fileName: 'marketing.csv',
+			},
+		],
+	},
+];
 
-// Print the transformed data
-console.log('data=', JSON.stringify(formedData, null, 4));
+const mergedData = mergeDashboardData(existingData, newData);
+console.log(JSON.stringify(mergedData, null, 2));

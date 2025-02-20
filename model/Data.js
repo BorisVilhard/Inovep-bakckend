@@ -1,3 +1,5 @@
+// models/Dashboard.js
+
 import mongoose from 'mongoose';
 
 const validChartTypes = [
@@ -15,8 +17,7 @@ const validChartTypes = [
 ];
 
 /**
- * EntrySchema
- * - Represents a single data point entry.
+ * EntrySchema – represents a single data point.
  */
 const EntrySchema = new mongoose.Schema(
 	{
@@ -29,8 +30,7 @@ const EntrySchema = new mongoose.Schema(
 );
 
 /**
- * IndexedEntriesSchema
- * - Represents a chart’s main data with an identifier and type.
+ * IndexedEntriesSchema – represents a chart’s main data.
  */
 const IndexedEntriesSchema = new mongoose.Schema(
 	{
@@ -44,8 +44,7 @@ const IndexedEntriesSchema = new mongoose.Schema(
 );
 
 /**
- * CombinedChartSchema
- * - Represents a chart that aggregates data from multiple charts.
+ * CombinedChartSchema – represents a chart aggregating data from multiple charts.
  */
 const CombinedChartSchema = new mongoose.Schema(
 	{
@@ -58,8 +57,7 @@ const CombinedChartSchema = new mongoose.Schema(
 );
 
 /**
- * DashboardCategorySchema
- * - Represents a category within a dashboard that contains one or more charts.
+ * DashboardCategorySchema – represents a category inside a dashboard.
  */
 const DashboardCategorySchema = new mongoose.Schema(
 	{
@@ -74,29 +72,34 @@ const DashboardCategorySchema = new mongoose.Schema(
 );
 
 /**
- * DashboardSchema
- * - Represents the dashboard document containing metadata, an array of categories,
- *   a list of uploaded file records, and the owning user.
- *
- * Options:
- *   - optimisticConcurrency: false disables version-based update conflicts.
- *   - timestamps: adds createdAt and updatedAt fields.
+ * FileRecordSchema – represents a record for an uploaded file.
+ * Note the new `folderId` field in `monitoring`.
+ */
+const FileRecordSchema = new mongoose.Schema(
+	{
+		fileId: { type: String }, // for cloud files (or folder ID)
+		filename: { type: String, required: true },
+		content: [DashboardCategorySchema],
+		lastUpdate: { type: Date },
+		source: { type: String, enum: ['local', 'google'], default: 'local' },
+		monitoring: {
+			status: { type: String, enum: ['active', 'expired'], default: 'active' },
+			expireDate: { type: Date }, // Date that the channel expires
+			folderId: { type: String, default: null }, // Null if this is file-based monitoring
+			// folderName: { type: String }, // (Optional) only if you still want to store folderName
+		},
+	},
+	{ _id: false }
+);
+
+/**
+ * DashboardSchema – the parent dashboard document.
  */
 const DashboardSchema = new mongoose.Schema(
 	{
 		dashboardName: { type: String, required: true, unique: true },
 		dashboardData: [DashboardCategorySchema],
-		files: {
-			type: [
-				{
-					fileId: { type: String },
-					filename: { type: String, required: true },
-					content: [DashboardCategorySchema],
-					lastUpdate: { type: Date },
-				},
-			],
-			default: [],
-		},
+		files: { type: [FileRecordSchema], default: [] },
 		userId: {
 			type: mongoose.Schema.Types.ObjectId,
 			ref: 'User',

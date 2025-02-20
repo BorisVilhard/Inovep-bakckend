@@ -946,44 +946,60 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
  * POST /users/:id/dashboard/uploadCloud
  * Uploads pre-processed cloud data to update or create a dashboard.
  */
+
+/**
+ * POST /users/:id/dashboard/uploadCloud
+ * Uploads pre-processed cloud data to update or create a dashboard.
+ */
+
+/**
+ * POST /users/:id/dashboard/uploadCloud
+ * Uploads pre-processed cloud data to update or create a dashboard.
+ * If the same file is uploaded again, its data completely replaces the previous data.
+ * A cover-up check ensures that the merged dashboardData includes entries from all unique files.
+ */
 export const uploadCloudData = async (req, res) => {
 	try {
 		const userId = req.params.id;
-		// Destructure the payload; note that fileId may not be provided.
-		const { dashboardId, dashboardName, fileName, dashboardData } = req.body;
-		let { fileId } = req.body;
+		const {
+			dashboardId,
+			dashboardName,
+			fileName,
+			dashboardData,
+			folderId, // provided if the file was obtained via folder monitoring
+			channelExpiration,
+		} = req.body;
 
-		// If fileId is missing, use fileName as a fallback.
+		// Use fileName as fileId if not explicitly provided.
+		let { fileId } = req.body;
 		if (!fileId) {
 			fileId = fileName;
 		}
 
-		// Validate required parameters.
+		// Basic validations.
 		if (
 			!fileId ||
 			!fileName ||
-			!dashboardData ||
-			(Array.isArray(dashboardData) && dashboardData.length === 0)
+			!Array.isArray(dashboardData) ||
+			dashboardData.length === 0
 		) {
 			return res.status(400).json({
-				message: 'fileId, fileName, and dashboardData are required',
+				message: 'fileId, fileName, and a non-empty dashboardData are required',
 			});
 		}
 		if (!dashboardId && !dashboardName) {
-			return res
-				.status(400)
-				.json({ message: 'dashboardId or dashboardName is required' });
+			return res.status(400).json({
+				message: 'dashboardId or dashboardName is required',
+			});
 		}
 
-		// Retrieve the stored tokens for the user.
+		// Retrieve user tokens and create an authenticated client.
 		const tokens = await getTokens(userId);
 		if (!tokens || !tokens.access_token) {
 			return res
 				.status(401)
 				.json({ message: 'No valid tokens found for user' });
 		}
-
-		// Create an authenticated OAuth2 client using the stored tokens.
 		const authClient = await getUserAuthClient(
 			tokens.access_token,
 			tokens.refresh_token,
@@ -992,30 +1008,40 @@ export const uploadCloudData = async (req, res) => {
 		if (!authClient) {
 			return res
 				.status(401)
-				.json({ message: 'Could not get authenticated client' });
+				.json({ message: 'Could not create an authenticated client' });
 		}
 
-		// If fileId is valid (i.e. not the fallback value), try to get the modified time.
-		let lastUpdate;
+		// Attempt to get the lastUpdate (modified time) from the Drive API.
+		let lastUpdate = new Date();
 		if (fileId && fileId !== fileName) {
 			try {
 				const modifiedTimeStr = await getGoogleDriveModifiedTime(
 					fileId,
 					authClient
 				);
-				lastUpdate = modifiedTimeStr ? new Date(modifiedTimeStr) : new Date();
-			} catch (driveError) {
+				if (modifiedTimeStr) {
+					lastUpdate = new Date(modifiedTimeStr);
+				}
+			} catch (err) {
 				console.warn(
-					'Failed to fetch modified time, using current date:',
-					driveError.message
+					'Failed to fetch modifiedTime from Drive. Using current date.',
+					err.message
 				);
-				lastUpdate = new Date();
 			}
-		} else {
-			lastUpdate = new Date();
 		}
 
-		// Retrieve the dashboard document.
+		// Determine channel expiration date.
+		let expireDate;
+		if (channelExpiration) {
+			expireDate = new Date(channelExpiration);
+			if (isNaN(expireDate.getTime())) {
+				expireDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+			}
+		} else {
+			expireDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+		}
+
+		// Retrieve or create the dashboard document.
 		let dashboard;
 		if (dashboardId) {
 			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
@@ -1028,7 +1054,7 @@ export const uploadCloudData = async (req, res) => {
 					.json({ message: `Dashboard ID ${dashboardId} not found` });
 			}
 		} else {
-			// Create a new dashboard if one does not exist by name.
+			// Create a new dashboard if one doesn't exist.
 			const existing = await Dashboard.findOne({ dashboardName, userId });
 			if (existing) {
 				return res.status(400).json({
@@ -1043,41 +1069,82 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// Log the merging process for debugging.
-		console.log('Existing dashboardData:', dashboard.dashboardData);
-		console.log('New dashboardData:', dashboardData);
-		const mergedData = mergeDashboardData(
+		// Remove any existing file record with the same fileName.
+		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
+
+		// Remove previous dashboardData entries that came from the same file.
+		dashboard.dashboardData.forEach((category) => {
+			category.mainData.forEach((chart) => {
+				chart.data = chart.data.filter((entry) => entry.fileName !== fileName);
+			});
+			category.mainData = category.mainData.filter(
+				(chart) => chart.data.length > 0
+			);
+		});
+		dashboard.dashboardData = dashboard.dashboardData.filter(
+			(category) => category.mainData.length > 0
+		);
+
+		// Merge new dashboardData with existing data.
+		// The mergeDashboardData utility should be implemented to replace data from the same file.
+		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
-		console.log('Merged dashboardData:', mergedData);
-		dashboard.dashboardData = mergedData;
 
-		// Remove any existing file record with the same fileName.
-		const existingFileIndex = dashboard.files.findIndex(
-			(f) => f.filename === fileName
-		);
-		if (existingFileIndex !== -1) {
-			dashboard.files.splice(existingFileIndex, 1);
-		}
-
-		// Add the new file record.
+		// Push the new file record.
 		dashboard.files.push({
 			fileId,
 			filename: fileName,
 			content: dashboardData,
-			lastUpdate: lastUpdate,
+			lastUpdate,
+			source: 'google',
+			monitoring: {
+				status: 'active',
+				expireDate,
+				folderId: folderId || null,
+			},
 		});
 
+		// ----- COVER-UP CHECK -----
+		// Compare number of files uploaded with the unique fileNames present in the merged dashboardData.
+		let attempts = 0;
+		while (attempts < 5) {
+			const mergedFileNames = new Set();
+			dashboard.dashboardData.forEach((category) => {
+				category.mainData.forEach((chart) => {
+					chart.data.forEach((entry) => {
+						mergedFileNames.add(entry.fileName);
+					});
+				});
+			});
+
+			// If the count matches the number of file records, we're done.
+			if (mergedFileNames.size === dashboard.files.length) {
+				break;
+			}
+
+			// For any missing file, re-merge its content.
+			dashboard.files.forEach((fileRecord) => {
+				if (!mergedFileNames.has(fileRecord.filename)) {
+					dashboard.dashboardData = mergeDashboardData(
+						dashboard.dashboardData,
+						fileRecord.content
+					);
+				}
+			});
+			attempts++;
+		}
+		// ----- END COVER-UP CHECK -----
+
 		await dashboard.save();
-		return res.status(200).json({
+
+		res.status(200).json({
 			message: 'Cloud data uploaded successfully',
 			dashboard,
 		});
 	} catch (error) {
-		console.error('Error in uploadCloudData:', error);
-		return res
-			.status(500)
-			.json({ message: 'Server error', error: error.message });
+		console.error('uploadCloudData error:', error);
+		res.status(500).json({ message: 'Server error', error: error.message });
 	}
 };
