@@ -20,6 +20,7 @@ import {
 	updateCombinedChart,
 	processCloudText,
 	uploadCloudData,
+	checkAndUpdateMonitoredFiles,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
@@ -119,6 +120,13 @@ router.put(
 	'/users/:id/dashboard/:dashboardId/category/:categoryId/combinedChart/:combinedChartId',
 	verifyUserOwnership,
 	updateCombinedChart
+);
+
+// routes/api/data.js
+router.get(
+	'/users/:id/dashboard/:dashboardId/check-monitored-files',
+	verifyUserOwnership,
+	checkAndUpdateMonitoredFiles
 );
 
 export default router;

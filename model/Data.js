@@ -1,5 +1,4 @@
 // models/Dashboard.js
-
 import mongoose from 'mongoose';
 
 const validChartTypes = [
@@ -73,20 +72,18 @@ const DashboardCategorySchema = new mongoose.Schema(
 
 /**
  * FileRecordSchema – represents a record for an uploaded file.
- * Note the new `folderId` field in `monitoring`.
  */
 const FileRecordSchema = new mongoose.Schema(
 	{
-		fileId: { type: String }, // for cloud files (or folder ID)
+		fileId: { type: String }, // Google Drive file ID or synthetic ID
 		filename: { type: String, required: true },
 		content: [DashboardCategorySchema],
-		lastUpdate: { type: Date },
+		lastUpdate: { type: Date }, // Tracks last known modifiedTime
 		source: { type: String, enum: ['local', 'google'], default: 'local' },
 		monitoring: {
 			status: { type: String, enum: ['active', 'expired'], default: 'active' },
 			expireDate: { type: Date }, // Date that the channel expires
-			folderId: { type: String, default: null }, // Null if this is file-based monitoring
-			// folderName: { type: String }, // (Optional) only if you still want to store folderName
+			folderId: { type: String, default: null }, // Folder ID if monitored via folder
 		},
 	},
 	{ _id: false }

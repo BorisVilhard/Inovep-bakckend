@@ -8,8 +8,8 @@ import { PdfReader } from 'pdfreader';
 import xlsx from 'xlsx';
 import { fileTypeFromBuffer } from 'file-type';
 
-import { PromptTemplate } from 'langchain/prompts';
-import { LLMChain } from 'langchain/chains';
+import { PromptTemplate } from "@langchain/core/prompts";
+import { LLMChain } from "langchain/chains";
 
 // Constants
 const MAX_MESSAGES = 10;

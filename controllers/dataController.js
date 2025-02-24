@@ -1,3 +1,4 @@
+// controllers/dataController.js
 import Dashboard from '../model/Data.js';
 import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
@@ -13,6 +14,7 @@ import { mergeDashboardData } from '../utils/dashboardUtils.js';
 import { getGoogleDriveModifiedTime } from '../utils/googleDriveService.js';
 import { getUserAuthClient } from '../utils/oauthService.js';
 import { getTokens } from '../tokenStore.js';
+import { google } from 'googleapis';
 
 const UPLOAD_FOLDER = './uploads';
 
@@ -203,11 +205,9 @@ export const deleteDataByFileName = async (req, res) => {
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
-		// Remove file from files array
 		dashboard.files = dashboard.files.filter(
 			(file) => file.filename !== fileName
 		);
-		// Remove data points matching the fileName from each chart
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData = category.mainData.filter((chart) => {
 				chart.data = chart.data.filter(
@@ -216,7 +216,6 @@ export const deleteDataByFileName = async (req, res) => {
 				return chart.data.length > 0;
 			});
 		});
-		// Remove empty categories
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
@@ -263,7 +262,6 @@ const getDocumentText = async (filePath, fileType) => {
 					console.error('Error parsing PDF:', err);
 					reject(err);
 				} else if (!item) {
-					// End of file
 					resolve(text);
 				} else if (item.text) {
 					text += item.text + ' ';
@@ -451,18 +449,10 @@ export const updateCategoryData = async (req, res) => {
 				.status(404)
 				.json({ message: `Category ${categoryName} not found` });
 		}
-		if (combinedData) {
-			category.combinedData = combinedData;
-		}
-		if (summaryData) {
-			category.summaryData = summaryData;
-		}
-		if (appliedChartType) {
-			category.appliedChartType = appliedChartType;
-		}
-		if (checkedIds) {
-			category.checkedIds = checkedIds;
-		}
+		if (combinedData) category.combinedData = combinedData;
+		if (summaryData) category.summaryData = summaryData;
+		if (appliedChartType) category.appliedChartType = appliedChartType;
+		if (checkedIds) category.checkedIds = checkedIds;
 		await dashboard.save();
 		res.json({ message: 'Category data updated successfully', dashboard });
 	} catch (error) {
@@ -495,7 +485,6 @@ export const addCombinedChart = async (req, res) => {
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
-		// Here, we assume that categoryId is equivalent to categoryName.
 		const category = dashboard.dashboardData.find(
 			(cat) => cat.categoryName === categoryId
 		);
@@ -591,9 +580,7 @@ export const updateCombinedChart = async (req, res) => {
 		if (!combinedChart) {
 			return res.status(404).json({ message: 'CombinedChart not found' });
 		}
-		if (chartType) {
-			combinedChart.chartType = chartType;
-		}
+		if (chartType) combinedChart.chartType = chartType;
 		if (chartIds) {
 			if (!Array.isArray(chartIds) || chartIds.length < 2) {
 				return res
@@ -654,7 +641,6 @@ export const createOrUpdateDashboard = async (req, res) => {
 			});
 			return res.status(400).json({ message: 'Unsupported file type' });
 		}
-		// Extract text from the file
 		const documentText = await getDocumentText(filePath, fileType);
 		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
 
@@ -672,8 +658,7 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 			temperature: 0.8,
 		});
 		const response = await model.predict(formattedPrompt);
-		const aiResponseContent = response;
-		const extractedData = extractJavascriptCode(aiResponseContent);
+		const extractedData = extractJavascriptCode(response);
 		const formedData = transformDataStructure(extractedData, fileName);
 		const { dashboardData } = formedData;
 		if (!dashboardData) {
@@ -682,11 +667,7 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 			});
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
-		// Prepare file record
-		const fileData = {
-			filename: fileName,
-			content: dashboardData,
-		};
+		const fileData = { filename: fileName, content: dashboardData };
 		let dashboard;
 		if (dashboardId) {
 			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
@@ -698,7 +679,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 					.status(404)
 					.json({ message: `Dashboard ID ${dashboardId} not found` });
 			}
-			// Merge new data with existing dashboardData
 			dashboard.dashboardData = mergeDashboardData(
 				dashboard.dashboardData,
 				dashboardData
@@ -794,8 +774,7 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 			temperature: 0.8,
 		});
 		const response = await model.predict(formattedPrompt);
-		const aiResponseContent = response;
-		const extractedData = extractJavascriptCode(aiResponseContent);
+		const extractedData = extractJavascriptCode(response);
 		const formedData = transformDataStructure(extractedData, fileName);
 		const { dashboardData } = formedData;
 		if (!dashboardData) {
@@ -858,19 +837,17 @@ function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
 
 /**
  * POST /users/:id/dashboard/:dashboardId/cloudText
- * Processes raw cloud text (e.g. from Google Drive) using GPT, merges the data, and updates the dashboard.
+ * Processes raw cloud text (e.g., from Google Drive) using GPT, merges the data, and updates the dashboard.
  */
 export const processCloudText = async (req, res) => {
 	try {
 		const userId = req.params.id;
 		const { dashboardId } = req.params;
 		const { fullText, fileName } = req.body;
-		if (!fullText) {
+		if (!fullText)
 			return res.status(400).json({ message: 'No fullText provided' });
-		}
-		if (!fileName) {
+		if (!fileName)
 			return res.status(400).json({ message: 'No fileName provided' });
-		}
 		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 			return res.status(400).json({ message: 'Invalid dashboardId' });
 		}
@@ -904,7 +881,6 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 		if (!dashboardData) {
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
-		// Remove old file references from the dashboard
 		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData.forEach((chart) => {
@@ -917,7 +893,6 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
-		// Merge the new dashboard data
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
@@ -946,18 +921,6 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
  * POST /users/:id/dashboard/uploadCloud
  * Uploads pre-processed cloud data to update or create a dashboard.
  */
-
-/**
- * POST /users/:id/dashboard/uploadCloud
- * Uploads pre-processed cloud data to update or create a dashboard.
- */
-
-/**
- * POST /users/:id/dashboard/uploadCloud
- * Uploads pre-processed cloud data to update or create a dashboard.
- * If the same file is uploaded again, its data completely replaces the previous data.
- * A cover-up check ensures that the merged dashboardData includes entries from all unique files.
- */
 export const uploadCloudData = async (req, res) => {
 	try {
 		const userId = req.params.id;
@@ -966,34 +929,28 @@ export const uploadCloudData = async (req, res) => {
 			dashboardName,
 			fileName,
 			dashboardData,
-			folderId, // provided if the file was obtained via folder monitoring
+			folderId,
 			channelExpiration,
 		} = req.body;
-
-		// Use fileName as fileId if not explicitly provided.
-		let { fileId } = req.body;
+		// Require a proper fileId instead of defaulting to fileName.
+		const { fileId } = req.body;
 		if (!fileId) {
-			fileId = fileName;
+			return res.status(400).json({
+				message:
+					'fileId is required. Please provide a valid Google Drive fileId.',
+			});
 		}
-
-		// Basic validations.
 		if (
-			!fileId ||
 			!fileName ||
 			!Array.isArray(dashboardData) ||
 			dashboardData.length === 0
 		) {
 			return res.status(400).json({
-				message: 'fileId, fileName, and a non-empty dashboardData are required',
-			});
-		}
-		if (!dashboardId && !dashboardName) {
-			return res.status(400).json({
-				message: 'dashboardId or dashboardName is required',
+				message: 'fileName and a non-empty dashboardData are required',
 			});
 		}
 
-		// Retrieve user tokens and create an authenticated client.
+		// Retrieve tokens and create an authenticated client.
 		const tokens = await getTokens(userId);
 		if (!tokens || !tokens.access_token) {
 			return res
@@ -1011,37 +968,28 @@ export const uploadCloudData = async (req, res) => {
 				.json({ message: 'Could not create an authenticated client' });
 		}
 
-		// Attempt to get the lastUpdate (modified time) from the Drive API.
+		// Calculate lastUpdate based on Drive's modifiedTime
 		let lastUpdate = new Date();
-		if (fileId && fileId !== fileName) {
-			try {
-				const modifiedTimeStr = await getGoogleDriveModifiedTime(
-					fileId,
-					authClient
-				);
-				if (modifiedTimeStr) {
-					lastUpdate = new Date(modifiedTimeStr);
-				}
-			} catch (err) {
-				console.warn(
-					'Failed to fetch modifiedTime from Drive. Using current date.',
-					err.message
-				);
-			}
+		try {
+			const modifiedTimeStr = await getGoogleDriveModifiedTime(
+				fileId,
+				authClient
+			);
+			if (modifiedTimeStr) lastUpdate = new Date(modifiedTimeStr);
+		} catch (err) {
+			console.warn(
+				'Failed to fetch modifiedTime from Drive. Using current date.',
+				err.message
+			);
 		}
 
-		// Determine channel expiration date.
-		let expireDate;
-		if (channelExpiration) {
-			expireDate = new Date(channelExpiration);
-			if (isNaN(expireDate.getTime())) {
-				expireDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-			}
-		} else {
+		let expireDate = channelExpiration
+			? new Date(channelExpiration)
+			: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+		if (isNaN(expireDate.getTime())) {
 			expireDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 		}
 
-		// Retrieve or create the dashboard document.
 		let dashboard;
 		if (dashboardId) {
 			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
@@ -1054,7 +1002,6 @@ export const uploadCloudData = async (req, res) => {
 					.json({ message: `Dashboard ID ${dashboardId} not found` });
 			}
 		} else {
-			// Create a new dashboard if one doesn't exist.
 			const existing = await Dashboard.findOne({ dashboardName, userId });
 			if (existing) {
 				return res.status(400).json({
@@ -1069,10 +1016,8 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// Remove any existing file record with the same fileName.
+		// Remove any old data from the same file.
 		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
-
-		// Remove previous dashboardData entries that came from the same file.
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData.forEach((chart) => {
 				chart.data = chart.data.filter((entry) => entry.fileName !== fileName);
@@ -1084,47 +1029,29 @@ export const uploadCloudData = async (req, res) => {
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
-
-		// Merge new dashboardData with existing data.
-		// The mergeDashboardData utility should be implemented to replace data from the same file.
+		// Merge the new dashboardData.
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
-
-		// Push the new file record.
 		dashboard.files.push({
 			fileId,
 			filename: fileName,
 			content: dashboardData,
 			lastUpdate,
 			source: 'google',
-			monitoring: {
-				status: 'active',
-				expireDate,
-				folderId: folderId || null,
-			},
+			monitoring: { status: 'active', expireDate, folderId: folderId || null },
 		});
 
-		// ----- COVER-UP CHECK -----
-		// Compare number of files uploaded with the unique fileNames present in the merged dashboardData.
 		let attempts = 0;
 		while (attempts < 5) {
 			const mergedFileNames = new Set();
 			dashboard.dashboardData.forEach((category) => {
 				category.mainData.forEach((chart) => {
-					chart.data.forEach((entry) => {
-						mergedFileNames.add(entry.fileName);
-					});
+					chart.data.forEach((entry) => mergedFileNames.add(entry.fileName));
 				});
 			});
-
-			// If the count matches the number of file records, we're done.
-			if (mergedFileNames.size === dashboard.files.length) {
-				break;
-			}
-
-			// For any missing file, re-merge its content.
+			if (mergedFileNames.size === dashboard.files.length) break;
 			dashboard.files.forEach((fileRecord) => {
 				if (!mergedFileNames.has(fileRecord.filename)) {
 					dashboard.dashboardData = mergeDashboardData(
@@ -1135,16 +1062,209 @@ export const uploadCloudData = async (req, res) => {
 			});
 			attempts++;
 		}
-		// ----- END COVER-UP CHECK -----
 
 		await dashboard.save();
-
-		res.status(200).json({
-			message: 'Cloud data uploaded successfully',
-			dashboard,
-		});
+		res
+			.status(200)
+			.json({ message: 'Cloud data uploaded successfully', dashboard });
 	} catch (error) {
 		console.error('uploadCloudData error:', error);
 		res.status(500).json({ message: 'Server error', error: error.message });
 	}
 };
+
+/**
+ * GET /users/:id/dashboard/:dashboardId/check-monitored-files
+ * Checks monitored files for updates since last login and pulls new data if modified.
+ */
+export const checkAndUpdateMonitoredFiles = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		const { dashboardId } = req.params;
+
+		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+			return res.status(400).json({ message: 'Invalid dashboardId' });
+		}
+
+		const tokens = await getTokens(userId);
+		if (!tokens || !tokens.access_token) {
+			return res
+				.status(401)
+				.json({ message: 'No valid tokens found for user' });
+		}
+		const authClient = await getUserAuthClient(
+			tokens.access_token,
+			tokens.refresh_token,
+			tokens.expiry_date
+		);
+		const drive = google.drive({ version: 'v3', auth: authClient });
+
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res
+				.status(404)
+				.json({ message: `Dashboard ID ${dashboardId} not found` });
+		}
+
+		const updatedFiles = [];
+		for (const file of dashboard.files.filter(
+			(f) => f.source === 'google' && f.monitoring.status === 'active'
+		)) {
+			const { fileId, filename, lastUpdate } = file;
+			if (!fileId || fileId === filename) continue; // Skip if fileId isn't a Drive ID
+
+			try {
+				const currentModifiedTime = await drive.files
+					.get({
+						fileId,
+						fields: 'modifiedTime',
+					})
+					.then((res) => res.data.modifiedTime);
+				const storedDate = new Date(lastUpdate);
+				const currentDate = new Date(currentModifiedTime);
+
+				if (currentDate > storedDate) {
+					const fileContent = await fetchFileContent(fileId, authClient);
+					const dashboardData = await processFileContent(fileContent, filename);
+					dashboard.files = dashboard.files.filter(
+						(f) => f.filename !== filename
+					);
+					dashboard.dashboardData.forEach((category) => {
+						category.mainData.forEach((chart) => {
+							chart.data = chart.data.filter(
+								(entry) => entry.fileName !== filename
+							);
+						});
+						category.mainData = category.mainData.filter(
+							(chart) => chart.data.length > 0
+						);
+					});
+					dashboard.dashboardData = dashboard.dashboardData.filter(
+						(category) => category.mainData.length > 0
+					);
+					dashboard.dashboardData = mergeDashboardData(
+						dashboard.dashboardData,
+						dashboardData
+					);
+					dashboard.files.push({
+						fileId,
+						filename,
+						content: dashboardData,
+						lastUpdate: currentDate,
+						source: 'google',
+						monitoring: file.monitoring,
+					});
+					updatedFiles.push({
+						fileId,
+						filename,
+						lastUpdate: currentModifiedTime,
+					});
+				}
+			} catch (err) {
+				console.warn(`Error checking file ${fileId}:`, err.message);
+			}
+		}
+
+		if (updatedFiles.length > 0) {
+			await dashboard.save();
+			const io = req.app.get('io');
+			io.to(dashboardId).emit('dashboard-updated', { dashboardId, dashboard });
+		}
+
+		res.status(200).json({
+			message:
+				updatedFiles.length > 0
+					? 'Updated monitored files'
+					: 'No updates detected',
+			updatedFiles,
+		});
+	} catch (error) {
+		console.error('Error checking monitored files:', error);
+		res.status(500).json({ message: 'Server error', error: error.message });
+	}
+};
+
+/**
+ * Helper: Fetches file content from Google Drive.
+ */
+async function fetchFileContent(fileId, authClient) {
+	const drive = google.drive({ version: 'v3', auth: authClient });
+	const meta = await drive.files.get({ fileId, fields: 'mimeType' });
+	const mimeType = meta.data.mimeType;
+	let fileContent = '';
+
+	if (mimeType === 'application/vnd.google-apps.document') {
+		const docs = google.docs({ version: 'v1', auth: authClient });
+		const docResp = await docs.documents.get({ documentId: fileId });
+		fileContent = extractPlainText(docResp.data);
+	} else if (
+		mimeType === 'text/csv' ||
+		mimeType === 'application/vnd.google-apps.spreadsheet'
+	) {
+		const csvResp = await drive.files.export(
+			{ fileId, mimeType: 'text/csv' },
+			{ responseType: 'arraybuffer' }
+		);
+		fileContent = Buffer.from(csvResp.data).toString('utf8');
+	} else if (
+		mimeType ===
+		'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+	) {
+		const xlsxResp = await drive.files.get(
+			{ fileId, alt: 'media' },
+			{ responseType: 'arraybuffer' }
+		);
+		const workbook = xlsx.read(new Uint8Array(xlsxResp.data), {
+			type: 'array',
+		});
+		fileContent = workbook.SheetNames.map((sheetName) =>
+			xlsx.utils.sheet_to_csv(workbook.Sheets[sheetName])
+		).join('\n\n');
+	} else {
+		console.warn(`Unsupported mimeType: ${mimeType} for file ${fileId}`);
+	}
+	return fileContent;
+}
+
+/**
+ * Helper: Processes file content into dashboardData using GPT.
+ */
+async function processFileContent(fullText, fileName) {
+	const cleanedText = removeEmptyOrCommaLines(fullText);
+	const TEMPLATE = `
+You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
+Don't add additional text or code.
+Given the following text:
+{document_text}
+Transform it into table data in one array of objects called 'data' in JavaScript.
+Provide only the JavaScript code, and ensure the code is valid JavaScript.
+  `.trim();
+	const prompt = PromptTemplate.fromTemplate(TEMPLATE);
+	const formattedPrompt = await prompt.format({ document_text: cleanedText });
+	const model = new ChatOpenAI({
+		openAIApiKey: process.env.OPENAI_API_KEY,
+		modelName: 'gpt-3.5-turbo',
+		temperature: 0.8,
+	});
+	const gptResponse = await model.predict(formattedPrompt);
+	const extractedData = extractJavascriptCode(gptResponse);
+	const { dashboardData } = transformDataStructure(extractedData, fileName);
+	return dashboardData;
+}
+
+/**
+ * Helper: Extracts plain text from a Google Doc.
+ */
+function extractPlainText(doc) {
+	if (!doc.body || !doc.body.content) return '';
+	let text = '';
+	for (const element of doc.body.content) {
+		if (element.paragraph?.elements) {
+			for (const pe of element.paragraph.elements) {
+				if (pe.textRun?.content) text += pe.textRun.content;
+			}
+			text += '\n';
+		}
+	}
+	return text.trim();
+}
