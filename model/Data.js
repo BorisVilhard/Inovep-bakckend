@@ -73,41 +73,35 @@ const DashboardCategorySchema = new mongoose.Schema(
 /**
  * FileRecordSchema – represents a record for an uploaded file.
  */
+
 const FileRecordSchema = new mongoose.Schema(
 	{
-		fileId: { type: String }, // Google Drive file ID or synthetic ID
+		fileId: { type: String }, // Google Drive file ID
 		filename: { type: String, required: true },
-		content: [DashboardCategorySchema],
-		lastUpdate: { type: Date }, // Tracks last known modifiedTime
+		content: { type: Array }, // Processed dashboard data
+		lastUpdate: { type: Date }, // Last known modification time
 		source: { type: String, enum: ['local', 'google'], default: 'local' },
 		monitoring: {
 			status: { type: String, enum: ['active', 'expired'], default: 'active' },
-			expireDate: { type: Date }, // Date that the channel expires
-			folderId: { type: String, default: null }, // Folder ID if monitored via folder
+			expireDate: { type: Date }, // Webhook expiration
+			folderId: { type: String, default: null }, // If part of a monitored folder
 		},
 	},
 	{ _id: false }
 );
 
-/**
- * DashboardSchema – the parent dashboard document.
- */
 const DashboardSchema = new mongoose.Schema(
 	{
-		dashboardName: { type: String, required: true, unique: true },
-		dashboardData: [DashboardCategorySchema],
-		files: { type: [FileRecordSchema], default: [] },
+		dashboardName: { type: String, required: true },
+		dashboardData: { type: Array, default: [] }, // Main dashboard data
+		files: { type: [FileRecordSchema], default: [] }, // List of monitored files
 		userId: {
 			type: mongoose.Schema.Types.ObjectId,
 			ref: 'User',
 			required: true,
 		},
 	},
-	{
-		optimisticConcurrency: false,
-		versionKey: false,
-		timestamps: true,
-	}
+	{ timestamps: true }
 );
 
 const Dashboard = mongoose.model('Dashboard', DashboardSchema);

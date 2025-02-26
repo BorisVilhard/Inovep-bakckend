@@ -4,6 +4,7 @@ import { google } from 'googleapis';
 import XLSX from 'xlsx';
 import mongoose from 'mongoose';
 import { getTokens, saveTokens } from '../tokenStore.js'; // or wherever you store tokens
+import { mergeDashboardData } from '../utils/dashboardUtils.js';
 
 /**
  * ================
@@ -443,96 +444,114 @@ async function handleSingleFileNotification(resourceUri, io) {
 }
 
 /**
- * Handle folder changes via drive.changes.list().
- * - If new files are added or updated, fetch & emit them.
+ * Handles notifications from Google Drive about changes in monitored folders.
+ * Processes the changes and updates the dashboard accordingly.
+ * @param {Object} req - Express request object containing the notification details
+ * @param {Object} res - Express response object
+ * @param {Object} io - Socket.IO instance for real-time updates
  */
-async function handleChangesNotification(io) {
-	if (!monitoredFolderId || !changesPageToken) {
-		console.log('No folder monitored or missing changesPageToken');
-		return;
-	}
-
-	const userId = folderUserMapping[monitoredFolderId];
-	if (!userId) {
-		console.error(`No user mapping found for folderId: ${monitoredFolderId}`);
-		return;
-	}
-	if (!isValidObjectId(userId)) {
-		console.error(`Invalid user ID: ${userId}`);
-		return;
-	}
-
-	// OAuth
-	const tokens = await getTokens(userId);
-	if (!tokens || !tokens.access_token) return;
-	const { access_token, refresh_token, expiry_date } = tokens;
-
-	const oauth2Client = createOAuthClient(
-		access_token,
-		refresh_token,
-		expiry_date
-	);
-	const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
+async function handleChangesNotification(req, res, io) {
 	try {
-		const changesResp = await drive.changes.list({
-			pageToken: changesPageToken,
-			spaces: 'drive',
-			fields: 'newStartPageToken, nextPageToken, changes(fileId, removed)',
-		});
+		const channelId = req.headers['x-goog-channel-id'];
+		if (!channelId) {
+			console.error('Missing channel ID in notification');
+			return res.status(400).send('Missing channel ID');
+		}
 
-		const changes = changesResp.data.changes || [];
-		for (const c of changes) {
-			const fileId = c.fileId;
-			if (c.removed) {
-				console.log(`File removed: ${fileId}`);
-				delete fileModificationTimes[fileId];
-				continue;
-			}
-			try {
-				const fileMeta = await drive.files.get({
-					fileId,
-					fields: 'id, parents, modifiedTime, mimeType, name',
-				});
-				const parents = fileMeta.data.parents || [];
-				const currentModifiedTime = fileMeta.data.modifiedTime;
-				const fileNameFromMeta = fileMeta.data.name || 'cloud_file';
+		// Find user monitoring record
+		const userMonitoring = await UserMonitoring.findOne({ channelId });
+		if (!userMonitoring) {
+			console.error('UserMonitoring not found for channel ID:', channelId);
+			return res.status(404).send('UserMonitoring not found');
+		}
 
-				// If this file is indeed in the monitored folder
-				if (parents.includes(monitoredFolderId)) {
-					const prevModTime = fileModificationTimes[fileId] || null;
-					if (!prevModTime || prevModTime !== currentModifiedTime) {
-						fileModificationTimes[fileId] = currentModifiedTime;
-						await fetchAndEmitFileContent(
-							fileId,
-							oauth2Client,
-							io,
-							true,
-							fileNameFromMeta
+		const userId = userMonitoring.userId;
+		const monitoredFolders = userMonitoring.monitoredFolders;
+		const tokens = await getTokens(userId);
+		const authClient = createOAuthClient(
+			tokens.access_token,
+			tokens.refresh_token,
+			tokens.expiry_date
+		);
+		const drive = google.drive({ version: 'v3', auth: authClient });
+
+		for (const folder of monitoredFolders) {
+			const changesResp = await drive.changes.list({
+				pageToken: folder.changesPageToken,
+				spaces: 'drive',
+				fields:
+					'newStartPageToken, nextPageToken, changes(fileId, removed, file)',
+			});
+
+			for (const change of changesResp.data.changes) {
+				const file = change.file;
+				if (file && file.parents && file.parents.includes(folder.folderId)) {
+					const dashboard = await Dashboard.findOne({ userId });
+					if (!dashboard) continue;
+
+					if (change.removed) {
+						dashboard.dashboardData = removeFileFromDashboard(
+							dashboard.dashboardData,
+							file.name
+						);
+						dashboard.files = dashboard.files.filter(
+							(f) => f.fileId !== file.id
 						);
 					} else {
-						console.log(`No content change detected for fileId: ${fileId}`);
+						const fileContent = await fetchAndEmitFileContent(
+							file.id,
+							authClient
+						);
+						const dashboardData = await processFileContent(
+							fileContent,
+							file.name
+						);
+						dashboard.dashboardData = removeFileFromDashboard(
+							dashboard.dashboardData,
+							file.name
+						);
+						dashboard.dashboardData = mergeDashboardData(
+							dashboard.dashboardData,
+							dashboardData
+						);
+						const existingFile = dashboard.files.find(
+							(f) => f.fileId === file.id
+						);
+						if (existingFile) {
+							existingFile.content = dashboardData;
+							existingFile.lastUpdate = new Date(file.modifiedTime);
+						} else {
+							dashboard.files.push({
+								fileId: file.id,
+								filename: file.name,
+								content: dashboardData,
+								lastUpdate: new Date(file.modifiedTime),
+								source: 'google',
+								monitoring: { status: 'active', folderId: folder.folderId },
+							});
+						}
 					}
+					await dashboard.save();
+					io.to(userId).emit('dashboard-updated', {
+						dashboardId: dashboard._id,
+						dashboard,
+					});
 				}
-			} catch (fileErr) {
-				console.error(
-					`Error fetching metadata for fileId ${fileId}:`,
-					fileErr.response?.data || fileErr.message
-				);
+			}
+
+			// Update the changes page token
+			if (changesResp.data.newStartPageToken) {
+				folder.changesPageToken = changesResp.data.newStartPageToken;
+			} else if (changesResp.data.nextPageToken) {
+				folder.changesPageToken = changesResp.data.nextPageToken;
 			}
 		}
 
-		// Update page token
-		if (changesResp.data.newStartPageToken) {
-			changesPageToken = changesResp.data.newStartPageToken;
-		} else if (changesResp.data.nextPageToken) {
-			changesPageToken = changesResp.data.nextPageToken;
-		}
-	} catch (err) {
-		console.error(
-			'Error processing folder changes:',
-			err.response?.data || err.message
-		);
+		await userMonitoring.save();
+		return res.status(200).send('Notification processed');
+	} catch (error) {
+		console.error('Error handling changes notification:', error);
+		return res.status(500).send('Error processing notification');
 	}
 }
 
