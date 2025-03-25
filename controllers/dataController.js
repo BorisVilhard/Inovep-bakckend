@@ -836,14 +836,19 @@ function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
 }
 
 /**
- * POST /users/:id/dashboard/:dashboardId/cloudText
- * Processes raw cloud text (e.g., from Google Drive) using GPT, merges the data, and updates the dashboard.
+ * Processes raw cloud text (e.g., from Google Drive) using GPT, merges the data into the dashboard,
+ * and updates the dashboard in the database.
+ *
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
  */
 export const processCloudText = async (req, res) => {
 	try {
 		const userId = req.params.id;
 		const { dashboardId } = req.params;
 		const { fullText, fileName } = req.body;
+
+		// Validate input
 		if (!fullText)
 			return res.status(400).json({ message: 'No fullText provided' });
 		if (!fileName)
@@ -851,12 +856,18 @@ export const processCloudText = async (req, res) => {
 		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
 			return res.status(400).json({ message: 'Invalid dashboardId' });
 		}
+
+		// Retrieve the dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
+
+		// Clean the text
 		let cleanedText = removeEmptyOrCommaLines(fullText);
 		cleanedText = removeExcessiveRepetitions(cleanedText, 3);
+
+		// Prepare GPT prompt
 		const TEMPLATE = `
 You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
 Don't add additional text or code.
@@ -867,20 +878,27 @@ Given the following text:
 Transform it into table data in one array of objects called 'data' in JavaScript.
 Provide only the JavaScript code, and ensure the code is valid JavaScript.
     `.trim();
+
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({ document_text: cleanedText });
+
+		// Initialize and call GPT model
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
 		});
 		const gptResponse = await model.predict(formattedPrompt);
+
+		// Extract and transform data
 		const extractedData = extractJavascriptCode(gptResponse);
-		const formedData = transformDataStructure(extractedData, fileName);
-		const { dashboardData } = formedData;
+		const { dashboardData } = transformDataStructure(extractedData, fileName);
+
 		if (!dashboardData) {
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
+
+		// Remove old data associated with this file
 		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData.forEach((chart) => {
@@ -893,10 +911,14 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
+
+		// Merge new data
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
+
+		// Add new file record
 		const fileData = {
 			fileId: 'cloud-' + Date.now(),
 			filename: fileName,
@@ -904,7 +926,15 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 			lastUpdate: new Date(),
 		};
 		dashboard.files.push(fileData);
+
+		// Save the updated dashboard
 		await dashboard.save();
+
+		// Emit dashboard-updated event via Socket.io
+		const io = req.app.get('io');
+		io.to(dashboardId).emit('dashboard-updated', { dashboardId, dashboard });
+
+		// Respond with success
 		res.status(201).json({
 			message: 'Cloud text processed and data stored successfully',
 			dashboard,
