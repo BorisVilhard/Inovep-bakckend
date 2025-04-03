@@ -1,4 +1,3 @@
-// controllers/dataController.js
 import Dashboard from '../model/Data.js';
 import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
@@ -323,64 +322,85 @@ function cleanNumeric(value) {
 }
 
 /**
- * Transforms the extracted data into the dashboard data structure.
+ * Transforms the extracted Excel data into the dashboard data structure.
+ * It dynamically detects a column whose value is a date (in "yyyy-mm" or "yyyy-mm-dd" format)
+ * and uses that date for all data points in that row. That detected date (after formatting)
+ * is also used as the category name. If no date is detected, today's date is used and the first
+ * column's value becomes the category name.
+ *
+ * @param {Array} data - Array of objects extracted from Excel.
+ * @param {string} fileName - Name of the uploaded file.
+ * @returns {Object} - An object containing dashboardData.
  */
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
-	const today = format(new Date(), 'yyyy-MM-dd');
+	// Fallback date if none is detected.
+	const fallbackDate = format(new Date(), 'yyyy-MM-dd');
+	// Regex to match date strings: "yyyy-mm" or "yyyy-mm-dd"
+	const dateRegex = /^\d{4}-\d{2}(?:-\d{2})?$/;
+
 	data.forEach((item) => {
-		const groupNameKey = Object.keys(item)[0];
-		let monthName = item[groupNameKey];
-		delete item[groupNameKey];
-		if (typeof monthName !== 'string') {
-			console.warn(
-				'monthName is not a string. Converting to string.',
-				monthName
-			);
-			monthName = String(monthName);
-		}
-		if (monthName) {
-			const charts = [];
-			for (const [key, value] of Object.entries(item)) {
-				let chartTitle = key;
-				if (typeof chartTitle !== 'string') {
-					console.warn(
-						'chartTitle is not a string. Converting to string.',
-						chartTitle
-					);
-					chartTitle = String(chartTitle);
-				}
-				const cleanedValue = cleanNumeric(value);
-				const chartId = generateChartId(monthName, chartTitle);
-				charts.push({
-					chartType: 'Area',
-					id: chartId,
-					data: [
-						{
-							title: chartTitle,
-							value: cleanedValue,
-							date: today,
-							fileName: fileName,
-						},
-					],
-					isChartTypeChanged: false,
-					fileName: fileName,
-				});
+		const keys = Object.keys(item);
+		let detectedDate = null;
+		let detectedDateKey = null;
+
+		// Dynamically search for a date value in any column.
+		for (const key of keys) {
+			const val = item[key];
+			if (typeof val === 'string' && dateRegex.test(val.trim())) {
+				const trimmed = val.trim();
+				// If only "yyyy-mm" is provided, append "-01" to create a full date.
+				detectedDate = trimmed.length === 7 ? trimmed + '-01' : trimmed;
+				detectedDateKey = key;
+				break;
 			}
-			dashboardData.push({
-				categoryName: monthName,
-				mainData: charts,
-				combinedData: [],
+		}
+
+		// Use the detected date (if any) as the category name; otherwise, use the first column's value.
+		const categoryName =
+			detectedDate !== null
+				? detectedDate
+				: keys.length > 0
+				? String(item[keys[0]])
+				: 'Unknown';
+
+		const charts = [];
+		// Process each column except the one that was detected as the date.
+		for (const key of keys) {
+			if (key === detectedDateKey) continue;
+			const chartTitle = String(key);
+			const value = item[key];
+			let numericValue = cleanNumeric(value);
+			// If the cell itself appears to be a date, override its numeric value with a default (0).
+			if (typeof value === 'string' && dateRegex.test(value.trim())) {
+				numericValue = 0;
+			}
+			const chartId = generateChartId(categoryName, chartTitle);
+			charts.push({
+				chartType: 'Area',
+				id: chartId,
+				data: [
+					{
+						title: chartTitle,
+						value: numericValue,
+						date: detectedDate || fallbackDate,
+						fileName: fileName,
+					},
+				],
+				isChartTypeChanged: false,
+				fileName: fileName,
 			});
 		}
+
+		dashboardData.push({
+			categoryName: categoryName,
+			mainData: charts,
+			combinedData: [],
+		});
 	});
 	return { dashboardData };
 }
 
-/**
- * PUT /users/:id/dashboard/:dashboardId/chart/:chartId
- * Updates the chart type for a specific chart.
- */
 export const updateChartType = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, chartId } = req.params;

@@ -14,7 +14,6 @@ import {
 	getDashboardFiles,
 	updateChartType,
 	updateCategoryData,
-	processFile,
 	addCombinedChart,
 	deleteCombinedChart,
 	updateCombinedChart,
@@ -93,14 +92,6 @@ router.delete(
 	'/users/:id/dashboard/:dashboardId/file/:fileName',
 	verifyUserOwnership,
 	deleteDataByFileName
-);
-
-// Route to process a file (similar to upload) for local checking
-router.post(
-	'/users/:id/dashboard/:dashboardId/processFile',
-	verifyUserOwnership,
-	upload.single('file'),
-	processFile
 );
 
 // CombinedChart routes
