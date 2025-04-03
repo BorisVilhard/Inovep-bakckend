@@ -11,6 +11,7 @@ import { PromptTemplate } from '@langchain/core/prompts';
 import fs from 'fs';
 import path from 'path';
 import { mergeDashboardData } from '../utils/dashboardUtils.js';
+import { transformExcelDataToJSCode } from '../utils/ transformExcel.js';
 import { getGoogleDriveModifiedTime } from '../utils/googleDriveService.js';
 import { getUserAuthClient } from '../utils/oauthService.js';
 import { getTokens } from '../tokenStore.js';
@@ -18,9 +19,6 @@ import { google } from 'googleapis';
 
 const UPLOAD_FOLDER = './uploads';
 
-/**
- * Generates a chart ID based on the category and chart title.
- */
 function generateChartId(categoryName, chartTitle) {
 	if (typeof categoryName !== 'string') {
 		console.error('categoryName is not a string:', categoryName);
@@ -289,9 +287,6 @@ const getDocumentText = async (filePath, fileType) => {
 	}
 };
 
-/**
- * Extracts a JavaScript array from an AI response string.
- */
 function extractJavascriptCode(response) {
 	try {
 		const jsCodePattern = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
@@ -613,10 +608,6 @@ export const updateCombinedChart = async (req, res) => {
 	}
 };
 
-/**
- * POST /users/:id/dashboard/upload
- * Uploads a file and creates or updates a dashboard with the processed file data.
- */
 export const createOrUpdateDashboard = async (req, res) => {
 	try {
 		const userId = req.params.id;
@@ -642,22 +633,10 @@ export const createOrUpdateDashboard = async (req, res) => {
 			return res.status(400).json({ message: 'Unsupported file type' });
 		}
 		const documentText = await getDocumentText(filePath, fileType);
-		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
+		console.log('document text:', documentText);
 
-Given the following text:
-{document_text}
-
-Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
-		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
-		const formattedPrompt = await prompt.format({
-			document_text: documentText,
-		});
-		const model = new ChatOpenAI({
-			openAIApiKey: process.env.OPENAI_API_KEY,
-			modelName: 'gpt-3.5-turbo',
-			temperature: 0.8,
-		});
-		const response = await model.predict(formattedPrompt);
+		const response = transformExcelDataToJSCode(documentText);
+		console.log('ai response', response);
 		const extractedData = extractJavascriptCode(response);
 		const formedData = transformDataStructure(extractedData, fileName);
 		const { dashboardData } = formedData;
@@ -720,75 +699,6 @@ Transform it into table data in one array of objects called 'data' in JavaScript
 			.json({ message: 'Dashboard processed successfully', dashboard });
 	} catch (error) {
 		console.error('Error processing document and creating dashboard:', error);
-		if (req.file) {
-			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-		}
-		res.status(500).json({ error: error.message });
-	}
-};
-
-/**
- * POST /users/:id/dashboard/:dashboardId/processFile
- * Processes a file and returns the extracted dashboard data without saving.
- */
-export const processFile = async (req, res) => {
-	try {
-		const userId = req.params.id;
-		if (!req.file) {
-			return res.status(400).json({ message: 'No file uploaded' });
-		}
-		const file = req.file;
-		const filePath = path.join(UPLOAD_FOLDER, file.filename);
-		const fileType = file.mimetype;
-		const fileName = file.originalname;
-		const allowedTypes = [
-			'application/pdf',
-			'image/png',
-			'image/jpeg',
-			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-			'application/vnd.ms-excel',
-		];
-		if (!allowedTypes.includes(fileType)) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res.status(400).json({ message: 'Unsupported file type' });
-		}
-		const documentText = await getDocumentText(filePath, fileType);
-		const TEMPLATE = `You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript don't add additional text or code.
-
-Given the following text:
-{document_text}
-
-Transform it into table data in one array of objects called 'data' in JavaScript. Provide only the JavaScript code, and ensure the code is valid JavaScript.`;
-		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
-		const formattedPrompt = await prompt.format({
-			document_text: documentText,
-		});
-		const model = new ChatOpenAI({
-			openAIApiKey: process.env.OPENAI_API_KEY,
-			modelName: 'gpt-3.5-turbo',
-			temperature: 0.8,
-		});
-		const response = await model.predict(formattedPrompt);
-		const extractedData = extractJavascriptCode(response);
-		const formedData = transformDataStructure(extractedData, fileName);
-		const { dashboardData } = formedData;
-		if (!dashboardData) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res.status(400).json({ message: 'dashboardData is required' });
-		}
-		fs.unlink(filePath, (err) => {
-			if (err) console.error('Error deleting file:', err);
-		});
-		res.status(200).json({ dashboardData });
-	} catch (error) {
-		console.error('Error processing document:', error);
 		if (req.file) {
 			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
 			fs.unlink(filePath, (err) => {
@@ -1260,26 +1170,24 @@ async function fetchFileContent(fileId, authClient) {
  * Helper: Processes file content into dashboardData using GPT.
  */
 async function processFileContent(fullText, fileName) {
-	const cleanedText = removeEmptyOrCommaLines(fullText);
-	const TEMPLATE = `
-You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
-Don't add additional text or code.
-Given the following text:
-{document_text}
-Transform it into table data in one array of objects called 'data' in JavaScript.
-Provide only the JavaScript code, and ensure the code is valid JavaScript.
-  `.trim();
-	const prompt = PromptTemplate.fromTemplate(TEMPLATE);
-	const formattedPrompt = await prompt.format({ document_text: cleanedText });
-	const model = new ChatOpenAI({
-		openAIApiKey: process.env.OPENAI_API_KEY,
-		modelName: 'gpt-3.5-turbo',
-		temperature: 0.8,
-	});
-	const gptResponse = await model.predict(formattedPrompt);
-	const extractedData = extractJavascriptCode(gptResponse);
-	const { dashboardData } = transformDataStructure(extractedData, fileName);
-	return dashboardData;
+	try {
+		// Parse the JSON string into an array of objects
+		const data = JSON.parse(fullText);
+
+		// Validate that the parsed data is an array
+		if (!Array.isArray(data)) {
+			throw new Error('Parsed data is not an array');
+		}
+
+		// Transform the parsed data into the dashboardData structure
+		const { dashboardData } = transformDataStructure(data, fileName);
+
+		// Return the transformed dashboardData
+		return dashboardData;
+	} catch (error) {
+		console.error('Error processing file content:', error);
+		throw error;
+	}
 }
 
 /**

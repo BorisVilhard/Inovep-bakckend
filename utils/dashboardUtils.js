@@ -22,15 +22,12 @@ export const mergeDashboardData = (existingData, newData) => {
 				if (existingChart) {
 					const newValue = newChart.data[0]?.value;
 					if (typeof newValue === 'string') {
-						// Replace existing data with new data
 						existingChart.data = newChart.data;
 					} else if (newChart.isChartTypeChanged) {
-						// Replace existing data and update chartType
 						existingChart.data = newChart.data;
 						existingChart.chartType = newChart.chartType;
 						existingChart.isChartTypeChanged = true;
 					} else {
-						// Merge data arrays
 						existingChart.data = [...existingChart.data, ...newChart.data];
 					}
 				} else {
@@ -38,7 +35,6 @@ export const mergeDashboardData = (existingData, newData) => {
 				}
 			});
 
-			// Merge combinedData
 			if (newCategory.combinedData && newCategory.combinedData.length > 0) {
 				newCategory.combinedData.forEach((newCombinedChart) => {
 					const existingCombinedChart = existingCategory.combinedData.find(
@@ -46,7 +42,6 @@ export const mergeDashboardData = (existingData, newData) => {
 					);
 
 					if (existingCombinedChart) {
-						// Update if necessary
 						existingCombinedChart.chartType = newCombinedChart.chartType;
 						existingCombinedChart.chartIds = newCombinedChart.chartIds;
 						existingCombinedChart.data = newCombinedChart.data;
@@ -56,7 +51,6 @@ export const mergeDashboardData = (existingData, newData) => {
 				});
 			}
 
-			// Merge summaryData
 			if (newCategory.summaryData && newCategory.summaryData.length > 0) {
 				existingCategory.summaryData = [
 					...existingCategory.summaryData,
@@ -64,7 +58,6 @@ export const mergeDashboardData = (existingData, newData) => {
 				];
 			}
 		} else {
-			// Add new category
 			mergedData.push(newCategory);
 		}
 	});

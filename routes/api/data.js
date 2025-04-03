@@ -40,7 +40,6 @@ router.post(
 	createDashboard
 );
 
-// Route to upload a file and create or update a dashboard
 router.post(
 	'/users/:id/dashboard/upload',
 	verifyUserOwnership,
@@ -48,7 +47,6 @@ router.post(
 	createOrUpdateDashboard
 );
 
-// NEW Route to process raw cloud text via GPT and store data
 router.post(
 	'/users/:id/dashboard/:dashboardId/cloudText',
 	verifyUserOwnership,

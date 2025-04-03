@@ -8,8 +8,8 @@ import { PdfReader } from 'pdfreader';
 import xlsx from 'xlsx';
 import { fileTypeFromBuffer } from 'file-type';
 
-import { PromptTemplate } from "@langchain/core/prompts";
-import { LLMChain } from "langchain/chains";
+import { PromptTemplate } from '@langchain/core/prompts';
+import { LLMChain } from 'langchain/chains';
 
 // Constants
 const MAX_MESSAGES = 10;
@@ -20,7 +20,7 @@ const formatMessage = (message) => {
 };
 
 // Updated prompt template with {file_content}
-const TEMPLATE = `You are a data analyzer, you are given data in an array and you answer questions regarding the data.
+const TEMPLATE = `You are a data analyzer, you are given data in an array and you very briefly answer questions regarding the data.
 
 Data provided:
 {file_content}
