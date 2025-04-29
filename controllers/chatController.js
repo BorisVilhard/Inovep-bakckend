@@ -19,7 +19,6 @@ const formatMessage = (message) => {
 	return `${message.role}: ${message.content}`;
 };
 
-// Updated prompt template with {file_content}
 const TEMPLATE = `You are a data analyzer, you are given data in an array and you very briefly answer questions regarding the data.
 
 Data provided:
@@ -31,7 +30,6 @@ Current conversation:
 user: {input}
 assistant:`;
 
-// Function to extract text from file (PDF or Excel)
 const extractTextFromFile = async (buffer) => {
 	return new Promise(async (resolve, reject) => {
 		// Detect the file type from the buffer

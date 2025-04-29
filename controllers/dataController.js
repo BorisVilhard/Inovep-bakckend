@@ -632,43 +632,167 @@ export const createOrUpdateDashboard = async (req, res) => {
 	try {
 		const userId = req.params.id;
 		const { dashboardId, dashboardName } = req.body;
+
+		console.log('createOrUpdateDashboard request:', {
+			userId,
+			dashboardId,
+			dashboardName,
+			hasFile: !!req.file,
+		});
+
 		if (!req.file) {
 			return res.status(400).json({ message: 'No file uploaded' });
 		}
+
 		const file = req.file;
 		const filePath = path.join(UPLOAD_FOLDER, file.filename);
 		const fileType = file.mimetype;
 		const fileName = file.originalname;
+
+		console.log('Received file details:', {
+			fileName,
+			fileType,
+			fileSize: file.size,
+			path: filePath,
+		});
+
 		const allowedTypes = [
 			'application/pdf',
 			'image/png',
 			'image/jpeg',
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 			'application/vnd.ms-excel',
+			'text/csv',
 		];
+
 		if (!allowedTypes.includes(fileType)) {
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
-			return res.status(400).json({ message: 'Unsupported file type' });
+			return res.status(400).json({
+				message: 'Unsupported file type',
+				receivedType: fileType,
+				allowedTypes,
+			});
 		}
-		const documentText = await getDocumentText(filePath, fileType);
-		console.log('document text:', documentText);
 
-		const response = transformExcelDataToJSCode(documentText);
-		console.log('ai response', response);
-		const extractedData = extractJavascriptCode(response);
-		const formedData = transformDataStructure(extractedData, fileName);
-		const { dashboardData } = formedData;
-		if (!dashboardData) {
+		let documentText;
+		try {
+			if (fileType === 'application/pdf') {
+				const pdfReader = new PdfReader();
+				const data = fs.readFileSync(filePath);
+				documentText = await new Promise((resolve, reject) => {
+					let text = '';
+					pdfReader.parseBuffer(data, (err, item) => {
+						if (err) reject(err);
+						else if (!item) resolve(text);
+						else if (item.text) text += item.text + ' ';
+					});
+				});
+			} else if (fileType === 'image/png' || fileType === 'image/jpeg') {
+				const image = sharp(filePath);
+				const buffer = await image.toBuffer();
+				const result = await tesseract.recognize(buffer);
+				documentText = result.data.text;
+			} else if (
+				fileType ===
+					'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+				fileType === 'application/vnd.ms-excel' ||
+				fileType === 'text/csv'
+			) {
+				const workbook = xlsx.readFile(filePath, { cellDates: true });
+				if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+					fs.unlink(filePath, (err) => {
+						if (err) console.error('Error deleting file:', err);
+					});
+					return res
+						.status(400)
+						.json({ error: 'Excel/CSV file has no sheets' });
+				}
+				const sheet = workbook.Sheets[workbook.SheetNames[0]];
+				if (!sheet) {
+					fs.unlink(filePath, (err) => {
+						if (err) console.error('Error deleting file:', err);
+					});
+					return res
+						.status(400)
+						.json({ error: 'Invalid sheet in Excel/CSV file' });
+				}
+				const data = xlsx.utils.sheet_to_json(sheet);
+				if (!data || !Array.isArray(data)) {
+					fs.unlink(filePath, (err) => {
+						if (err) console.error('Error deleting file:', err);
+					});
+					return res
+						.status(400)
+						.json({ error: 'No valid data extracted from Excel/CSV file' });
+				}
+				console.log('Excel/CSV processing details:', {
+					fileName,
+					sheetNames: workbook.SheetNames,
+					dataLength: data.length,
+				});
+				documentText = JSON.stringify(data);
+			} else {
+				throw new Error('Unexpected file type after validation');
+			}
+			console.log('Extracted document text length:', documentText.length);
+		} catch (extractError) {
+			console.error('Error extracting document text:', {
+				message: extractError.message,
+				stack: extractError.stack,
+			});
 			fs.unlink(filePath, (err) => {
 				if (err) console.error('Error deleting file:', err);
 			});
-			return res.status(400).json({ message: 'dashboardData is required' });
+			return res
+				.status(500)
+				.json({ error: `Text extraction failed: ${extractError.message}` });
 		}
-		const fileData = { filename: fileName, content: dashboardData };
+
+		let response;
+		try {
+			response = transformExcelDataToJSCode(documentText);
+			console.log('AI transformation response length:', response.length);
+		} catch (transformError) {
+			console.error('Error transforming data:', transformError);
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res.status(500).json({
+				error: `Data transformation failed: ${transformError.message}`,
+			});
+		}
+
+		const extractedData = extractJavascriptCode(response);
+		console.log('Extracted data items:', extractedData.length);
+
+		const formedData = transformDataStructure(extractedData, fileName);
+		const { dashboardData } = formedData;
+
+		if (!dashboardData || dashboardData.length === 0) {
+			fs.unlink(filePath, (err) => {
+				if (err) console.error('Error deleting file:', err);
+			});
+			return res
+				.status(400)
+				.json({ message: 'No valid dashboard data extracted' });
+		}
+
+		const fileData = {
+			filename: fileName,
+			content: dashboardData,
+		};
+
 		let dashboard;
 		if (dashboardId) {
+			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+				fs.unlink(filePath, (err) => {
+					if (err) console.error('Error deleting file:', err);
+				});
+				return res.status(400).json({ message: 'Invalid dashboard ID' });
+			}
+
 			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 			if (!dashboard) {
 				fs.unlink(filePath, (err) => {
@@ -710,15 +834,20 @@ export const createOrUpdateDashboard = async (req, res) => {
 				.status(400)
 				.json({ message: 'dashboardId or dashboardName is required' });
 		}
+
 		await dashboard.save();
 		fs.unlink(filePath, (err) => {
 			if (err) console.error('Error deleting file:', err);
 		});
+
 		res
 			.status(201)
 			.json({ message: 'Dashboard processed successfully', dashboard });
 	} catch (error) {
-		console.error('Error processing document and creating dashboard:', error);
+		console.error('Error in createOrUpdateDashboard:', {
+			message: error.message,
+			stack: error.stack,
+		});
 		if (req.file) {
 			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
 			fs.unlink(filePath, (err) => {
@@ -729,9 +858,6 @@ export const createOrUpdateDashboard = async (req, res) => {
 	}
 };
 
-/**
- * Utility: Removes lines that are empty or just a comma.
- */
 function removeEmptyOrCommaLines(text) {
 	return text
 		.split('\n')
@@ -1071,7 +1197,7 @@ export const checkAndUpdateMonitoredFiles = async (req, res) => {
 			(f) => f.source === 'google' && f.monitoring.status === 'active'
 		)) {
 			const { fileId, filename, lastUpdate } = file;
-			if (!fileId || fileId === filename) continue; // Skip if fileId isn't a Drive ID
+			if (!fileId || fileId === filename) continue;
 
 			try {
 				const currentModifiedTime = await drive.files

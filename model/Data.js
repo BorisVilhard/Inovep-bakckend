@@ -64,6 +64,8 @@ const FileRecordSchema = new mongoose.Schema(
 		content: [DashboardCategorySchema],
 		lastUpdate: { type: Date },
 		source: { type: String, enum: ['local', 'google'], default: 'local' },
+		isChunked: { type: Boolean, default: false },
+		chunkCount: { type: Number, default: 1 },
 		monitoring: {
 			status: { type: String, enum: ['active', 'expired'], default: 'active' },
 			expireDate: { type: Date },
