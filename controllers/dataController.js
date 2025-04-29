@@ -332,48 +332,86 @@ function cleanNumeric(value) {
  * @param {string} fileName - Name of the uploaded file.
  * @returns {Object} - An object containing dashboardData.
  */
+
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
-	// Fallback date if none is detected.
 	const fallbackDate = format(new Date(), 'yyyy-MM-dd');
-	// Regex to match date strings: "yyyy-mm" or "yyyy-mm-dd"
 	const dateRegex = /^\d{4}-\d{2}(?:-\d{2})?$/;
 
+	if (!Array.isArray(data) || data.length === 0) {
+		console.warn('transformDataStructure: No valid data provided', { data });
+		return { dashboardData };
+	}
+
+	// Helper function to check if a value is a string (not a number or date)
+	const isStringValue = (val) => {
+		if (typeof val !== 'string') return false;
+		if (!isNaN(parseFloat(val)) && isFinite(val)) return false; // Exclude numbers
+		if (dateRegex.test(val.trim())) return false; // Exclude dates
+		return true;
+	};
+
+	// Find the first column where all values are strings
+	let stringColumnKey = null;
+	const keys = Object.keys(data[0] || {});
+	if (keys.length > 0) {
+		for (const key of keys) {
+			const allStrings = data.every((item) => isStringValue(item[key]));
+			if (allStrings) {
+				stringColumnKey = key;
+				break;
+			}
+		}
+	}
+
+	if (stringColumnKey) {
+		console.log('Selected string column for categoryName:', stringColumnKey);
+	} else {
+		console.warn('No string column found, using fallback');
+	}
+
 	data.forEach((item) => {
+		if (!item || typeof item !== 'object') {
+			console.warn('Skipping invalid item in data', { item });
+			return;
+		}
+
 		const keys = Object.keys(item);
 		let detectedDate = null;
 		let detectedDateKey = null;
 
-		// Dynamically search for a date value in any column.
+		// Search for a date value for the chart's date field
 		for (const key of keys) {
 			const val = item[key];
 			if (typeof val === 'string' && dateRegex.test(val.trim())) {
 				const trimmed = val.trim();
-				// If only "yyyy-mm" is provided, append "-01" to create a full date.
 				detectedDate = trimmed.length === 7 ? trimmed + '-01' : trimmed;
 				detectedDateKey = key;
 				break;
 			}
 		}
 
-		// Use the detected date (if any) as the category name; otherwise, use the first column's value.
-		const categoryName =
-			detectedDate !== null
-				? detectedDate
-				: keys.length > 0
-				? String(item[keys[0]])
-				: 'Unknown';
+		// Set categoryName: use the string column's value, or fallback to first column
+		let categoryName;
+		if (
+			stringColumnKey &&
+			item[stringColumnKey] &&
+			String(item[stringColumnKey]).trim()
+		) {
+			categoryName = String(item[stringColumnKey]).trim();
+		} else {
+			categoryName = keys.length > 0 ? String(item[keys[0]]) : 'Unknown';
+		}
 
 		const charts = [];
-		// Process each column except the one that was detected as the date.
+		// Process each column except the string column used for categoryName
 		for (const key of keys) {
-			if (key === detectedDateKey) continue;
+			if (key === stringColumnKey) continue; // Skip the categoryName column
 			const chartTitle = String(key);
 			const value = item[key];
-			let numericValue = cleanNumeric(value);
-			// If the cell itself appears to be a date, override its numeric value with a default (0).
-			if (typeof value === 'string' && dateRegex.test(value.trim())) {
-				numericValue = 0;
+			let chartValue = value; // Preserve original value by default
+			if (typeof value === 'string' && !dateRegex.test(value.trim())) {
+				chartValue = cleanNumeric(value); // Convert to number if not a date
 			}
 			const chartId = generateChartId(categoryName, chartTitle);
 			charts.push({
@@ -382,7 +420,7 @@ function transformDataStructure(data, fileName) {
 				data: [
 					{
 						title: chartTitle,
-						value: numericValue,
+						value: chartValue,
 						date: detectedDate || fallbackDate,
 						fileName: fileName,
 					},
@@ -398,6 +436,7 @@ function transformDataStructure(data, fileName) {
 			combinedData: [],
 		});
 	});
+
 	return { dashboardData };
 }
 
