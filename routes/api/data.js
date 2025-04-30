@@ -1,5 +1,3 @@
-// routes/api/data.js
-
 import express from 'express';
 import multer from 'multer';
 import {
@@ -20,11 +18,13 @@ import {
 	processCloudText,
 	uploadCloudData,
 	checkAndUpdateMonitoredFiles,
+	uploadChunk,
+	finalizeChunk,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ storage: multer.memoryStorage() }); // Use memory storage
 
 // Apply JWT verification middleware to all routes
 router.use(verifyJWT);
@@ -39,6 +39,7 @@ router.post(
 	createDashboard
 );
 
+// Route for single-file upload
 router.post(
 	'/users/:id/dashboard/upload',
 	verifyUserOwnership,
@@ -46,6 +47,22 @@ router.post(
 	createOrUpdateDashboard
 );
 
+// Route for chunked file upload
+router.post(
+	'/users/:id/dashboard/upload-chunk',
+	verifyUserOwnership,
+	upload.single('chunk'),
+	uploadChunk
+);
+
+// Route to finalize chunked upload
+router.post(
+	'/users/:id/dashboard/finalize-chunk',
+	verifyUserOwnership,
+	finalizeChunk
+);
+
+// Route to process cloud text data
 router.post(
 	'/users/:id/dashboard/:dashboardId/cloudText',
 	verifyUserOwnership,
@@ -111,7 +128,7 @@ router.put(
 	updateCombinedChart
 );
 
-// routes/api/data.js
+// Route to check monitored files
 router.get(
 	'/users/:id/dashboard/:dashboardId/check-monitored-files',
 	verifyUserOwnership,

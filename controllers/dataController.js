@@ -1,4 +1,3 @@
-import Dashboard from '../model/Data.js';
 import mongoose from 'mongoose';
 import { PdfReader } from 'pdfreader';
 import { format } from 'date-fns';
@@ -7,30 +6,18 @@ import tesseract from 'tesseract.js';
 import xlsx from 'xlsx';
 import { ChatOpenAI } from '@langchain/openai';
 import { PromptTemplate } from '@langchain/core/prompts';
-import fs from 'fs';
-import path from 'path';
+import { Readable } from 'stream';
+import { parse } from 'csv-parse';
 import { mergeDashboardData } from '../utils/dashboardUtils.js';
-import { transformExcelDataToJSCode } from '../utils/ transformExcel.js';
+import { transformExcelDataToJSCode } from '../utils/transformExcel.js';
 import { getGoogleDriveModifiedTime } from '../utils/googleDriveService.js';
 import { getUserAuthClient } from '../utils/oauthService.js';
 import { getTokens } from '../tokenStore.js';
 import { google } from 'googleapis';
+import Dashboard from '../model/Data.js';
 
-const UPLOAD_FOLDER = './uploads';
-
-function generateChartId(categoryName, chartTitle) {
-	if (typeof categoryName !== 'string') {
-		console.error('categoryName is not a string:', categoryName);
-		categoryName = String(categoryName);
-	}
-	if (typeof chartTitle !== 'string') {
-		console.error('chartTitle is not a string:', chartTitle);
-		chartTitle = String(chartTitle);
-	}
-	return `${categoryName.toLowerCase().replace(/\s+/g, '-')}-${chartTitle
-		.toLowerCase()
-		.replace(/\s+/g, '-')}`;
-}
+// In-memory store for chunks
+const chunkStore = new Map(); // { chunkId: { chunks: Buffer[], totalChunks: number, fileName: string, fileType: string } }
 
 /**
  * Middleware: Verify that the user making the request owns the resource.
@@ -57,6 +44,7 @@ export const getAllDashboards = async (req, res) => {
 		}
 		res.json(dashboards);
 	} catch (error) {
+		console.error('Error fetching dashboards:', error);
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
@@ -77,6 +65,7 @@ export const getDashboardById = async (req, res) => {
 		}
 		res.json(dashboard);
 	} catch (error) {
+		console.error('Error fetching dashboard:', error);
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
@@ -156,6 +145,7 @@ export const updateDashboard = async (req, res) => {
 		await dashboard.save();
 		res.json({ message: 'Dashboard updated successfully', dashboard });
 	} catch (error) {
+		console.error('Error updating dashboard:', error);
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
@@ -241,20 +231,20 @@ export const getDashboardFiles = async (req, res) => {
 		const files = dashboard.files.map((file) => file.filename);
 		res.json({ files });
 	} catch (error) {
+		console.error('Error fetching dashboard files:', error);
 		res.status(500).json({ message: 'Server error', error });
 	}
 };
 
 /**
- * Extracts text from a document based on its type.
+ * Extracts text from a document based on its type using memory-based processing.
  */
-const getDocumentText = async (filePath, fileType) => {
+const getDocumentText = async (buffer, fileType) => {
 	let text = '';
 	if (fileType === 'application/pdf') {
 		const pdfReader = new PdfReader();
-		const data = fs.readFileSync(filePath);
 		return new Promise((resolve, reject) => {
-			pdfReader.parseBuffer(data, (err, item) => {
+			pdfReader.parseBuffer(buffer, (err, item) => {
 				if (err) {
 					console.error('Error parsing PDF:', err);
 					reject(err);
@@ -266,17 +256,18 @@ const getDocumentText = async (filePath, fileType) => {
 			});
 		});
 	} else if (fileType === 'image/png' || fileType === 'image/jpeg') {
-		const image = sharp(filePath);
-		const buffer = await image.toBuffer();
-		const result = await tesseract.recognize(buffer);
+		const image = sharp(buffer);
+		const imageBuffer = await image.toBuffer();
+		const result = await tesseract.recognize(imageBuffer);
 		text = result.data.text;
 		return text;
 	} else if (
 		fileType ===
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-		fileType === 'application/vnd.ms-excel'
+		fileType === 'application/vnd.ms-excel' ||
+		fileType === 'text/csv'
 	) {
-		const workbook = xlsx.readFile(filePath);
+		const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
 		const sheet = workbook.Sheets[workbook.SheetNames[0]];
 		const data = xlsx.utils.sheet_to_json(sheet);
 		text = JSON.stringify(data);
@@ -286,30 +277,6 @@ const getDocumentText = async (filePath, fileType) => {
 	}
 };
 
-function extractJavascriptCode(response) {
-	try {
-		const jsCodePattern = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
-		const match = response.match(jsCodePattern);
-		if (match) {
-			let jsArrayString = match[1];
-			jsArrayString = jsArrayString.replace(/\/\/.*/g, '');
-			jsArrayString = jsArrayString.replace(/(\w+):/g, '"$1":');
-			jsArrayString = jsArrayString.replace(/'/g, '"');
-			jsArrayString = jsArrayString.replace(/\b(null|undefined)\b/g, 'null');
-			jsArrayString = jsArrayString.replace(/,\s*\]/g, ']');
-			return JSON.parse(jsArrayString);
-		} else {
-			return [];
-		}
-	} catch (error) {
-		console.error('Error decoding JSON:', error);
-		return [];
-	}
-}
-
-/**
- * Cleans a string value by extracting numeric content.
- */
 function cleanNumeric(value) {
 	if (typeof value === 'string') {
 		const numMatch = value.match(/-?\d+(\.\d+)?/);
@@ -321,37 +288,167 @@ function cleanNumeric(value) {
 	return value;
 }
 
-/**
- * Transforms the extracted Excel data into the dashboard data structure.
- * It dynamically detects a column whose value is a date (in "yyyy-mm" or "yyyy-mm-dd" format)
- * and uses that date for all data points in that row. That detected date (after formatting)
- * is also used as the category name. If no date is detected, today's date is used and the first
- * column's value becomes the category name.
- *
- * @param {Array} data - Array of objects extracted from Excel.
- * @param {string} fileName - Name of the uploaded file.
- * @returns {Object} - An object containing dashboardData.
- */
+function generateChartId(categoryName, chartTitle) {
+	if (typeof categoryName !== 'string') {
+		console.error('categoryName is not a string:', categoryName);
+		categoryName = String(categoryName);
+	}
+	if (typeof chartTitle !== 'string') {
+		console.error('chartTitle is not a string:', chartTitle);
+		chartTitle = String(chartTitle);
+	}
+	return `${categoryName.toLowerCase().replace(/\s+/g, '-')}-${chartTitle
+		.toLowerCase()
+		.replace(/\s+/g, '-')}`;
+}
+
+function extractJavascriptCode(response) {
+	try {
+		// Validate response format
+		if (!response.startsWith('const data = [')) {
+			console.error('Invalid AI response format:', response.substring(0, 200));
+			return [];
+		}
+
+		// Extract the JavaScript array from the response
+		const jsCodePattern = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
+		const match = response.match(jsCodePattern);
+		if (!match) {
+			console.error('No JavaScript array found in response:', response);
+			return [];
+		}
+
+		let jsArrayString = match[1];
+		console.log(
+			'Raw extracted JavaScript array:',
+			jsArrayString.substring(0, 200)
+		);
+
+		// Protect ISO date strings by wrapping them in a placeholder
+		const datePlaceholder = '__ISO_DATE__';
+		const dateMap = new Map();
+		let dateCounter = 0;
+		jsArrayString = jsArrayString.replace(
+			/\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\b/g,
+			(match) => {
+				const placeholder = `${datePlaceholder}${dateCounter++}`;
+				dateMap.set(placeholder, match);
+				return placeholder;
+			}
+		);
+
+		// Clean the string to produce valid JSON
+		jsArrayString = jsArrayString
+			// Remove comments
+			.replace(/\/\/.*?\n/g, '')
+			// Convert unquoted keys to quoted keys
+			.replace(/(\w+):/g, '"$1":')
+			// Replace single quotes with double quotes
+			.replace(/'/g, '"')
+			// Replace null/undefined with "null"
+			.replace(/\b(null|undefined)\b/g, '"null"')
+			// Remove trailing commas before closing brackets/objects
+			.replace(/,\s*\]/g, ']')
+			.replace(/,\s*\}/g, '}')
+			// Normalize whitespace
+			.replace(/\s+/g, ' ')
+			// Fix object separation
+			.replace(/\}\s*\{/g, '},{')
+			// Remove trailing commas
+			.replace(/,(\s*[\]\}])/g, '$1');
+
+		// Restore ISO date strings
+		dateMap.forEach((date, placeholder) => {
+			jsArrayString = jsArrayString.replace(`"${placeholder}"`, `"${date}"`);
+		});
+
+		console.log('Cleaned JavaScript array:', jsArrayString.substring(0, 200));
+
+		// Validate JSON syntax before parsing
+		try {
+			JSON.parse(jsArrayString);
+		} catch (syntaxError) {
+			console.error('Invalid JSON syntax after cleaning:', syntaxError, {
+				jsArrayStringSnippet: jsArrayString.substring(0, 200),
+			});
+			throw syntaxError;
+		}
+
+		const parsedData = JSON.parse(jsArrayString);
+		if (!Array.isArray(parsedData)) {
+			console.error('Parsed data is not an array:', parsedData);
+			return [];
+		}
+		console.log('Successfully parsed data:', parsedData.length, 'items');
+		return parsedData;
+	} catch (error) {
+		console.error('Error decoding JSON:', error, {
+			responseSnippet: response.substring(Math.max(0, response.length - 100)),
+			fullResponseLength: response.length,
+		});
+
+		// Fallback: Attempt to extract partial valid JSON
+		try {
+			const partialMatch = response.match(/\[[\s\S]*?\]/);
+			if (partialMatch) {
+				let partialString = partialMatch[0];
+				const dateMap = new Map();
+				let dateCounter = 0;
+				partialString = partialString.replace(
+					/\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\b/g,
+					(match) => {
+						const placeholder = `__ISO_DATE__${dateCounter++}`;
+						dateMap.set(placeholder, match);
+						return placeholder;
+					}
+				);
+				partialString = partialString
+					.replace(/\/\/.*?\n/g, '')
+					.replace(/(\w+):/g, '"$1":')
+					.replace(/'/g, '"')
+					.replace(/\b(null|undefined)\b/g, '"null"')
+					.replace(/,\s*\]/g, ']')
+					.replace(/,\s*\}/g, '}')
+					.replace(/\s+/g, ' ')
+					.replace(/\}\s*\{/g, '},{')
+					.replace(/,(\s*[\]\}])/g, '$1');
+				dateMap.forEach((date, placeholder) => {
+					partialString = partialString.replace(
+						`"${placeholder}"`,
+						`"${date}"`
+					);
+				});
+				const partialData = JSON.parse(partialString);
+				if (Array.isArray(partialData)) {
+					console.log('Recovered partial data:', partialData.length, 'items');
+					return partialData;
+				}
+			}
+		} catch (partialError) {
+			console.error('Failed to recover partial data:', partialError);
+		}
+		return [];
+	}
+}
 
 function transformDataStructure(data, fileName) {
 	const dashboardData = [];
 	const fallbackDate = format(new Date(), 'yyyy-MM-dd');
 	const dateRegex = /^\d{4}-\d{2}(?:-\d{2})?$/;
+	const BATCH_SIZE = 1000;
 
 	if (!Array.isArray(data) || data.length === 0) {
 		console.warn('transformDataStructure: No valid data provided', { data });
 		return { dashboardData };
 	}
 
-	// Helper function to check if a value is a string (not a number or date)
 	const isStringValue = (val) => {
 		if (typeof val !== 'string') return false;
-		if (!isNaN(parseFloat(val)) && isFinite(val)) return false; // Exclude numbers
-		if (dateRegex.test(val.trim())) return false; // Exclude dates
+		if (!isNaN(parseFloat(val)) && isFinite(val)) return false;
+		if (dateRegex.test(val.trim())) return false;
 		return true;
 	};
 
-	// Find the first column where all values are strings
 	let stringColumnKey = null;
 	const keys = Object.keys(data[0] || {});
 	if (keys.length > 0) {
@@ -370,72 +467,77 @@ function transformDataStructure(data, fileName) {
 		console.warn('No string column found, using fallback');
 	}
 
-	data.forEach((item) => {
-		if (!item || typeof item !== 'object') {
-			console.warn('Skipping invalid item in data', { item });
-			return;
-		}
-
-		const keys = Object.keys(item);
-		let detectedDate = null;
-		let detectedDateKey = null;
-
-		// Search for a date value for the chart's date field
-		for (const key of keys) {
-			const val = item[key];
-			if (typeof val === 'string' && dateRegex.test(val.trim())) {
-				const trimmed = val.trim();
-				detectedDate = trimmed.length === 7 ? trimmed + '-01' : trimmed;
-				detectedDateKey = key;
-				break;
+	for (let i = 0; i < data.length; i += BATCH_SIZE) {
+		console.log(
+			`Processing batch ${i / BATCH_SIZE + 1} of ${Math.ceil(
+				data.length / BATCH_SIZE
+			)}`
+		);
+		const batch = data.slice(i, i + BATCH_SIZE);
+		batch.forEach((item) => {
+			if (!item || typeof item !== 'object') {
+				console.warn('Skipping invalid item in data', { item });
+				return;
 			}
-		}
 
-		// Set categoryName: use the string column's value, or fallback to first column
-		let categoryName;
-		if (
-			stringColumnKey &&
-			item[stringColumnKey] &&
-			String(item[stringColumnKey]).trim()
-		) {
-			categoryName = String(item[stringColumnKey]).trim();
-		} else {
-			categoryName = keys.length > 0 ? String(item[keys[0]]) : 'Unknown';
-		}
+			const keys = Object.keys(item);
+			let detectedDate = null;
+			let detectedDateKey = null;
 
-		const charts = [];
-		// Process each column except the string column used for categoryName
-		for (const key of keys) {
-			if (key === stringColumnKey) continue; // Skip the categoryName column
-			const chartTitle = String(key);
-			const value = item[key];
-			let chartValue = value; // Preserve original value by default
-			if (typeof value === 'string' && !dateRegex.test(value.trim())) {
-				chartValue = cleanNumeric(value); // Convert to number if not a date
+			for (const key of keys) {
+				const val = item[key];
+				if (typeof val === 'string' && dateRegex.test(val.trim())) {
+					const trimmed = val.trim();
+					detectedDate = trimmed.length === 7 ? trimmed + '-01' : trimmed;
+					detectedDateKey = key;
+					break;
+				}
 			}
-			const chartId = generateChartId(categoryName, chartTitle);
-			charts.push({
-				chartType: 'Area',
-				id: chartId,
-				data: [
-					{
-						title: chartTitle,
-						value: chartValue,
-						date: detectedDate || fallbackDate,
-						fileName: fileName,
-					},
-				],
-				isChartTypeChanged: false,
-				fileName: fileName,
+
+			let categoryName;
+			if (
+				stringColumnKey &&
+				item[stringColumnKey] &&
+				String(item[stringColumnKey]).trim()
+			) {
+				categoryName = String(item[stringColumnKey]).trim();
+			} else {
+				categoryName = keys.length > 0 ? String(item[keys[0]]) : 'Unknown';
+			}
+
+			const charts = [];
+			for (const key of keys) {
+				if (key === stringColumnKey) continue;
+				const chartTitle = String(key);
+				const value = item[key];
+				let chartValue = value;
+				if (typeof value === 'string' && !dateRegex.test(value.trim())) {
+					chartValue = cleanNumeric(value);
+				}
+				const chartId = generateChartId(categoryName, chartTitle);
+				charts.push({
+					chartType: 'Area',
+					id: chartId,
+					data: [
+						{
+							title: chartTitle,
+							value: chartValue,
+							date: detectedDate || fallbackDate,
+							fileName: fileName,
+						},
+					],
+					isChartTypeChanged: false,
+					fileName: fileName,
+				});
+			}
+
+			dashboardData.push({
+				categoryName: categoryName,
+				mainData: charts,
+				combinedData: [],
 			});
-		}
-
-		dashboardData.push({
-			categoryName: categoryName,
-			mainData: charts,
-			combinedData: [],
 		});
-	});
+	}
 
 	return { dashboardData };
 }
@@ -667,47 +769,35 @@ export const updateCombinedChart = async (req, res) => {
 	}
 };
 
-export const createOrUpdateDashboard = async (req, res) => {
+/**
+ * POST /users/:id/dashboard/upload-chunk
+ * Receives and stores a file chunk in memory.
+ */
+export const uploadChunk = async (req, res) => {
 	try {
 		const userId = req.params.id;
-		const { dashboardId, dashboardName } = req.body;
+		const { chunkId, chunkIndex, totalChunks, fileName, fileType } = req.body;
 
-		console.log('createOrUpdateDashboard request:', {
-			userId,
-			dashboardId,
-			dashboardName,
-			hasFile: !!req.file,
-		});
-
-		if (!req.file) {
-			return res.status(400).json({ message: 'No file uploaded' });
+		if (
+			!req.file ||
+			!chunkId ||
+			!chunkIndex ||
+			!totalChunks ||
+			!fileName ||
+			!fileType
+		) {
+			return res
+				.status(400)
+				.json({ message: 'Missing required chunk metadata' });
 		}
 
-		const file = req.file;
-		const filePath = path.join(UPLOAD_FOLDER, file.filename);
-		const fileType = file.mimetype;
-		const fileName = file.originalname;
-
-		console.log('Received file details:', {
-			fileName,
-			fileType,
-			fileSize: file.size,
-			path: filePath,
-		});
-
+		// Validate file type
 		const allowedTypes = [
-			'application/pdf',
-			'image/png',
-			'image/jpeg',
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 			'application/vnd.ms-excel',
 			'text/csv',
 		];
-
 		if (!allowedTypes.includes(fileType)) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
 			return res.status(400).json({
 				message: 'Unsupported file type',
 				receivedType: fileType,
@@ -715,89 +805,131 @@ export const createOrUpdateDashboard = async (req, res) => {
 			});
 		}
 
-		let documentText;
-		try {
-			if (fileType === 'application/pdf') {
-				const pdfReader = new PdfReader();
-				const data = fs.readFileSync(filePath);
-				documentText = await new Promise((resolve, reject) => {
-					let text = '';
-					pdfReader.parseBuffer(data, (err, item) => {
-						if (err) reject(err);
-						else if (!item) resolve(text);
-						else if (item.text) text += item.text + ' ';
-					});
-				});
-			} else if (fileType === 'image/png' || fileType === 'image/jpeg') {
-				const image = sharp(filePath);
-				const buffer = await image.toBuffer();
-				const result = await tesseract.recognize(buffer);
-				documentText = result.data.text;
-			} else if (
-				fileType ===
-					'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-				fileType === 'application/vnd.ms-excel' ||
-				fileType === 'text/csv'
-			) {
-				const workbook = xlsx.readFile(filePath, { cellDates: true });
-				if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-					fs.unlink(filePath, (err) => {
-						if (err) console.error('Error deleting file:', err);
-					});
-					return res
-						.status(400)
-						.json({ error: 'Excel/CSV file has no sheets' });
-				}
-				const sheet = workbook.Sheets[workbook.SheetNames[0]];
-				if (!sheet) {
-					fs.unlink(filePath, (err) => {
-						if (err) console.error('Error deleting file:', err);
-					});
-					return res
-						.status(400)
-						.json({ error: 'Invalid sheet in Excel/CSV file' });
-				}
-				const data = xlsx.utils.sheet_to_json(sheet);
-				if (!data || !Array.isArray(data)) {
-					fs.unlink(filePath, (err) => {
-						if (err) console.error('Error deleting file:', err);
-					});
-					return res
-						.status(400)
-						.json({ error: 'No valid data extracted from Excel/CSV file' });
-				}
-				console.log('Excel/CSV processing details:', {
-					fileName,
-					sheetNames: workbook.SheetNames,
-					dataLength: data.length,
-				});
-				documentText = JSON.stringify(data);
-			} else {
-				throw new Error('Unexpected file type after validation');
-			}
-			console.log('Extracted document text length:', documentText.length);
-		} catch (extractError) {
-			console.error('Error extracting document text:', {
-				message: extractError.message,
-				stack: extractError.stack,
+		// Store chunk in memory
+		const chunkIndexNum = parseInt(chunkIndex, 10);
+		if (!chunkStore.has(chunkId)) {
+			chunkStore.set(chunkId, {
+				chunks: new Array(parseInt(totalChunks, 10)).fill(null),
+				totalChunks: parseInt(totalChunks, 10),
+				fileName,
+				fileType,
 			});
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res
-				.status(500)
-				.json({ error: `Text extraction failed: ${extractError.message}` });
 		}
 
+		const chunkData = chunkStore.get(chunkId);
+		if (chunkIndexNum >= chunkData.totalChunks) {
+			return res.status(400).json({ message: 'Invalid chunk index' });
+		}
+
+		chunkData.chunks[chunkIndexNum] = req.file.buffer;
+
+		console.log('Chunk received:', {
+			chunkId,
+			chunkIndex,
+			totalChunks,
+			fileName,
+			fileType,
+			chunkSize: req.file.buffer.length,
+		});
+
+		res.status(200).json({
+			message: 'Chunk received successfully',
+			chunkId,
+			chunkIndex,
+		});
+	} catch (error) {
+		console.error('Error in uploadChunk:', error);
+		if (error.message.includes('Bad compressed size')) {
+			res.status(400).json({ error: 'Invalid or corrupted Excel/CSV file' });
+		} else {
+			res.status(500).json({ error: error.message });
+		}
+	}
+};
+
+/**
+ * POST /users/:id/dashboard/finalize-chunk
+ * Reassembles chunks from memory, processes the file, and updates the dashboard.
+ */
+export const finalizeChunk = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		const { chunkId, dashboardId, fileName, totalChunks } = req.body;
+
+		if (!chunkId || !dashboardId || !fileName || !totalChunks) {
+			return res.status(400).json({
+				message: 'Missing required finalize metadata',
+			});
+		}
+
+		// Validate dashboard
+		if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+			return res.status(400).json({ message: 'Invalid dashboard ID' });
+		}
+
+		let dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			return res
+				.status(404)
+				.json({ message: `Dashboard ID ${dashboardId} not found` });
+		}
+
+		// Retrieve and validate chunks from memory
+		if (!chunkStore.has(chunkId)) {
+			return res.status(400).json({ message: 'Chunk ID not found' });
+		}
+
+		const chunkData = chunkStore.get(chunkId);
+		if (chunkData.totalChunks !== parseInt(totalChunks, 10)) {
+			return res.status(400).json({ message: 'Mismatched total chunks' });
+		}
+
+		if (chunkData.chunks.some((chunk) => chunk === null)) {
+			return res.status(400).json({ message: 'Incomplete chunks received' });
+		}
+
+		// Reassemble chunks
+		const fileBuffer = Buffer.concat(chunkData.chunks);
+
+		// Process reassembled file
+		let chunkDataParsed = [];
+		if (fileName.endsWith('.csv')) {
+			const parser = parse({ columns: true, trim: true });
+			const chunkStream = Readable.from(fileBuffer);
+			for await (const row of chunkStream.pipe(parser)) {
+				chunkDataParsed.push(row);
+			}
+		} else {
+			const workbook = xlsx.read(fileBuffer, {
+				type: 'buffer',
+				cellDates: true,
+			});
+			const sheetName = workbook.SheetNames[0];
+			if (!sheetName) {
+				return res.status(400).json({ error: 'Excel/CSV file has no sheets' });
+			}
+			const sheet = workbook.Sheets[sheetName];
+			if (!sheet) {
+				return res
+					.status(400)
+					.json({ error: 'Invalid sheet in Excel/CSV file' });
+			}
+			chunkDataParsed = xlsx.utils.sheet_to_json(sheet, { raw: true });
+			if (!chunkDataParsed || !Array.isArray(chunkDataParsed)) {
+				return res
+					.status(400)
+					.json({ error: 'No valid data extracted from Excel/CSV file' });
+			}
+		}
+
+		// Transform chunk data
+		let documentText = JSON.stringify(chunkDataParsed);
 		let response;
 		try {
 			response = transformExcelDataToJSCode(documentText);
 			console.log('AI transformation response length:', response.length);
 		} catch (transformError) {
-			console.error('Error transforming data:', transformError);
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
+			console.error('Error transforming chunk data:', transformError);
 			return res.status(500).json({
 				error: `Data transformation failed: ${transformError.message}`,
 			});
@@ -807,135 +939,55 @@ export const createOrUpdateDashboard = async (req, res) => {
 		console.log('Extracted data items:', extractedData.length);
 
 		const formedData = transformDataStructure(extractedData, fileName);
-		const { dashboardData } = formedData;
+		const { dashboardData: transformedDashboardData } = formedData;
 
-		if (!dashboardData || dashboardData.length === 0) {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
+		if (!transformedDashboardData || transformedDashboardData.length === 0) {
 			return res
 				.status(400)
-				.json({ message: 'No valid dashboard data extracted' });
+				.json({ message: 'No valid dashboard data extracted from chunk' });
 		}
 
+		// Save aggregated dashboard data
 		const fileData = {
 			filename: fileName,
-			content: dashboardData,
+			content: transformedDashboardData,
+			source: 'local',
+			isChunked: true,
+			chunkCount: totalChunks,
 		};
 
-		let dashboard;
-		if (dashboardId) {
-			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
-				fs.unlink(filePath, (err) => {
-					if (err) console.error('Error deleting file:', err);
-				});
-				return res.status(400).json({ message: 'Invalid dashboard ID' });
-			}
-
-			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
-			if (!dashboard) {
-				fs.unlink(filePath, (err) => {
-					if (err) console.error('Error deleting file:', err);
-				});
-				return res
-					.status(404)
-					.json({ message: `Dashboard ID ${dashboardId} not found` });
-			}
-			dashboard.dashboardData = mergeDashboardData(
-				dashboard.dashboardData,
-				dashboardData
-			);
-			dashboard.files.push(fileData);
-		} else if (dashboardName) {
-			const existingDashboard = await Dashboard.findOne({
-				dashboardName,
-				userId,
-			});
-			if (existingDashboard) {
-				fs.unlink(filePath, (err) => {
-					if (err) console.error('Error deleting file:', err);
-				});
-				return res
-					.status(400)
-					.json({ message: 'Dashboard name already exists' });
-			}
-			dashboard = new Dashboard({
-				dashboardName,
-				dashboardData,
-				files: [fileData],
-				userId,
-			});
-		} else {
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
-			return res
-				.status(400)
-				.json({ message: 'dashboardId or dashboardName is required' });
-		}
-
+		dashboard.dashboardData = mergeDashboardData(
+			dashboard.dashboardData,
+			transformedDashboardData
+		);
+		dashboard.files.push(fileData);
 		await dashboard.save();
-		fs.unlink(filePath, (err) => {
-			if (err) console.error('Error deleting file:', err);
-		});
+
+		// Clean up in-memory chunks
+		chunkStore.delete(chunkId);
 
 		res
 			.status(201)
-			.json({ message: 'Dashboard processed successfully', dashboard });
+			.json({ message: 'Chunked file processed successfully', dashboard });
 	} catch (error) {
-		console.error('Error in createOrUpdateDashboard:', {
-			message: error.message,
-			stack: error.stack,
-		});
-		if (req.file) {
-			const filePath = path.join(UPLOAD_FOLDER, req.file.filename);
-			fs.unlink(filePath, (err) => {
-				if (err) console.error('Error deleting file:', err);
-			});
+		console.error('Error in finalizeChunk:', error);
+		if (error.message.includes('Bad compressed size')) {
+			res.status(400).json({ error: 'Invalid or corrupted Excel/CSV file' });
+		} else {
+			res.status(500).json({ error: error.message });
 		}
-		res.status(500).json({ error: error.message });
+	} finally {
+		// Ensure cleanup in case of errors
+		if (chunkStore.has(req.body.chunkId)) {
+			chunkStore.delete(req.body.chunkId);
+		}
 	}
 };
 
-function removeEmptyOrCommaLines(text) {
-	return text
-		.split('\n')
-		.filter((line) => {
-			const trimmed = line.trim();
-			return trimmed !== '' && trimmed !== ',';
-		})
-		.join('\n');
-}
-
 /**
- * Utility: Limits consecutive identical lines.
- */
-function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
-	const lines = text.split('\n');
-	const cleanedLines = [];
-	let lastLine = null;
-	let repeatCount = 0;
-	for (const line of lines) {
-		if (line === lastLine) {
-			repeatCount++;
-			if (repeatCount <= MAX_REPEAT_COUNT) {
-				cleanedLines.push(line);
-			}
-		} else {
-			lastLine = line;
-			repeatCount = 1;
-			cleanedLines.push(line);
-		}
-	}
-	return cleanedLines.join('\n');
-}
-
-/**
+ * POST /users/:id/dashboard/:dashboardId/cloudText
  * Processes raw cloud text (e.g., from Google Drive) using GPT, merges the data into the dashboard,
  * and updates the dashboard in the database.
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
  */
 export const processCloudText = async (req, res) => {
 	try {
@@ -943,7 +995,6 @@ export const processCloudText = async (req, res) => {
 		const { dashboardId } = req.params;
 		const { fullText, fileName } = req.body;
 
-		// Validate input
 		if (!fullText)
 			return res.status(400).json({ message: 'No fullText provided' });
 		if (!fileName)
@@ -952,40 +1003,40 @@ export const processCloudText = async (req, res) => {
 			return res.status(400).json({ message: 'Invalid dashboardId' });
 		}
 
-		// Retrieve the dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
 			return res.status(404).json({ message: 'Dashboard not found' });
 		}
 
-		// Clean the text
 		let cleanedText = removeEmptyOrCommaLines(fullText);
 		cleanedText = removeExcessiveRepetitions(cleanedText, 3);
 
-		// Prepare GPT prompt
 		const TEMPLATE = `
 You are a helpful assistant that transforms the given data into table data in one array of objects called 'data' in JavaScript.
-Don't add additional text or code.
+Output only valid JavaScript code with proper JSON syntax:
+- Use double quotes for strings.
+- Do not include trailing commas.
+- Do not include comments or extra text.
+- Preserve ISO date strings (e.g., "2024-03-01T23:00:00.000Z") exactly as provided without modification.
 
 Given the following text:
 {document_text}
 
-Transform it into table data in one array of objects called 'data' in JavaScript.
-Provide only the JavaScript code, and ensure the code is valid JavaScript.
-    `.trim();
+Transform it into table data as:
+const data = [{...}, {...}];
+`.trim();
 
 		const prompt = PromptTemplate.fromTemplate(TEMPLATE);
 		const formattedPrompt = await prompt.format({ document_text: cleanedText });
 
-		// Initialize and call GPT model
 		const model = new ChatOpenAI({
 			openAIApiKey: process.env.OPENAI_API_KEY,
 			modelName: 'gpt-3.5-turbo',
 			temperature: 0.8,
+			maxTokens: 4096,
 		});
 		const gptResponse = await model.predict(formattedPrompt);
 
-		// Extract and transform data
 		const extractedData = extractJavascriptCode(gptResponse);
 		const { dashboardData } = transformDataStructure(extractedData, fileName);
 
@@ -993,7 +1044,6 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 			return res.status(400).json({ message: 'dashboardData is required' });
 		}
 
-		// Remove old data associated with this file
 		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData.forEach((chart) => {
@@ -1007,13 +1057,11 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 			(category) => category.mainData.length > 0
 		);
 
-		// Merge new data
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
 		);
 
-		// Add new file record
 		const fileData = {
 			fileId: 'cloud-' + Date.now(),
 			filename: fileName,
@@ -1022,14 +1070,11 @@ Provide only the JavaScript code, and ensure the code is valid JavaScript.
 		};
 		dashboard.files.push(fileData);
 
-		// Save the updated dashboard
 		await dashboard.save();
 
-		// Emit dashboard-updated event via Socket.io
 		const io = req.app.get('io');
 		io.to(dashboardId).emit('dashboard-updated', { dashboardId, dashboard });
 
-		// Respond with success
 		res.status(201).json({
 			message: 'Cloud text processed and data stored successfully',
 			dashboard,
@@ -1057,7 +1102,6 @@ export const uploadCloudData = async (req, res) => {
 			folderId,
 			channelExpiration,
 		} = req.body;
-		// Require a proper fileId instead of defaulting to fileName.
 		const { fileId } = req.body;
 		if (!fileId) {
 			return res.status(400).json({
@@ -1075,7 +1119,6 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// Retrieve tokens and create an authenticated client.
 		const tokens = await getTokens(userId);
 		if (!tokens || !tokens.access_token) {
 			return res
@@ -1093,7 +1136,6 @@ export const uploadCloudData = async (req, res) => {
 				.json({ message: 'Could not create an authenticated client' });
 		}
 
-		// Calculate lastUpdate based on Drive's modifiedTime
 		let lastUpdate = new Date();
 		try {
 			const modifiedTimeStr = await getGoogleDriveModifiedTime(
@@ -1141,7 +1183,6 @@ export const uploadCloudData = async (req, res) => {
 			});
 		}
 
-		// Remove any old data from the same file.
 		dashboard.files = dashboard.files.filter((f) => f.filename !== fileName);
 		dashboard.dashboardData.forEach((category) => {
 			category.mainData.forEach((chart) => {
@@ -1154,7 +1195,6 @@ export const uploadCloudData = async (req, res) => {
 		dashboard.dashboardData = dashboard.dashboardData.filter(
 			(category) => category.mainData.length > 0
 		);
-		// Merge the new dashboardData.
 		dashboard.dashboardData = mergeDashboardData(
 			dashboard.dashboardData,
 			dashboardData
@@ -1356,18 +1396,11 @@ async function fetchFileContent(fileId, authClient) {
  */
 async function processFileContent(fullText, fileName) {
 	try {
-		// Parse the JSON string into an array of objects
 		const data = JSON.parse(fullText);
-
-		// Validate that the parsed data is an array
 		if (!Array.isArray(data)) {
 			throw new Error('Parsed data is not an array');
 		}
-
-		// Transform the parsed data into the dashboardData structure
 		const { dashboardData } = transformDataStructure(data, fileName);
-
-		// Return the transformed dashboardData
 		return dashboardData;
 	} catch (error) {
 		console.error('Error processing file content:', error);
@@ -1390,4 +1423,207 @@ function extractPlainText(doc) {
 		}
 	}
 	return text.trim();
+}
+
+/**
+ * POST /users/:id/dashboard/upload
+ * Creates or updates a dashboard with uploaded file data.
+ */
+export const createOrUpdateDashboard = async (req, res) => {
+	try {
+		const userId = req.params.id;
+		const { dashboardId, dashboardName } = req.body;
+
+		if (!req.file) {
+			return res.status(400).json({ message: 'No file uploaded' });
+		}
+
+		const file = req.file;
+		const fileType = file.mimetype;
+		const fileName = file.originalname;
+
+		// Validate file type
+		const allowedTypes = [
+			'application/pdf',
+			'image/png',
+			'image/jpeg',
+			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			'application/vnd.ms-excel',
+			'text/csv',
+		];
+		if (!allowedTypes.includes(fileType)) {
+			return res.status(400).json({
+				message: 'Unsupported file type',
+				receivedType: fileType,
+				allowedTypes,
+			});
+		}
+
+		// Extract text
+		let documentText;
+		if (
+			fileType ===
+				'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+			fileType === 'application/vnd.ms-excel' ||
+			fileType === 'text/csv'
+		) {
+			const workbook = xlsx.read(file.buffer, {
+				type: 'buffer',
+				cellDates: true,
+			});
+			if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+				return res.status(400).json({ error: 'Excel/CSV file has no sheets' });
+			}
+			const sheet = workbook.Sheets[workbook.SheetNames[0]];
+			if (!sheet) {
+				return res
+					.status(400)
+					.json({ error: 'Invalid sheet in Excel/CSV file' });
+			}
+			const data = xlsx.utils.sheet_to_json(sheet);
+			if (!data || !Array.isArray(data)) {
+				return res
+					.status(400)
+					.json({ error: 'No valid data extracted from Excel/CSV file' });
+			}
+			console.log('Excel/CSV processing details:', {
+				fileName,
+				sheetNames: workbook.SheetNames,
+				dataLength: data.length,
+			});
+			documentText = JSON.stringify(data);
+		} else if (fileType === 'application/pdf') {
+			const pdfReader = new PdfReader();
+			documentText = await new Promise((resolve, reject) => {
+				let text = '';
+				pdfReader.parseBuffer(file.buffer, (err, item) => {
+					if (err) reject(err);
+					else if (!item) resolve(text);
+					else if (item.text) text += item.text + ' ';
+				});
+			});
+		} else if (fileType === 'image/png' || fileType === 'image/jpeg') {
+			const image = sharp(file.buffer);
+			const buffer = await image.toBuffer();
+			const result = await tesseract.recognize(buffer);
+			documentText = result.data.text;
+		} else {
+			throw new Error('Unexpected file type after validation');
+		}
+
+		console.log('Extracted document text length:', documentText.length);
+
+		// Transform data
+		let response;
+		try {
+			response = transformExcelDataToJSCode(documentText);
+			console.log('AI transformation response length:', response.length);
+		} catch (transformError) {
+			console.error('Error transforming data:', transformError);
+			return res.status(500).json({
+				error: `Data transformation failed: ${transformError.message}`,
+			});
+		}
+
+		const extractedData = extractJavascriptCode(response);
+		console.log('Extracted data items:', extractedData.length);
+
+		const formedData = transformDataStructure(extractedData, fileName);
+		const { dashboardData } = formedData;
+
+		if (!dashboardData || dashboardData.length === 0) {
+			return res
+				.status(400)
+				.json({ message: 'No valid dashboard data extracted' });
+		}
+
+		// Save to database
+		const fileData = {
+			filename: fileName,
+			content: dashboardData,
+		};
+
+		let dashboard;
+		if (dashboardId) {
+			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+				return res.status(400).json({ message: 'Invalid dashboard ID' });
+			}
+
+			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+			if (!dashboard) {
+				return res
+					.status(404)
+					.json({ message: `Dashboard ID ${dashboardId} not found` });
+			}
+			dashboard.dashboardData = mergeDashboardData(
+				dashboard.dashboardData,
+				dashboardData
+			);
+			dashboard.files.push(fileData);
+		} else if (dashboardName) {
+			const existingDashboard = await Dashboard.findOne({
+				dashboardName,
+				userId,
+			});
+			if (existingDashboard) {
+				return res
+					.status(400)
+					.json({ message: 'Dashboard name already exists' });
+			}
+			dashboard = new Dashboard({
+				dashboardName,
+				dashboardData,
+				files: [fileData],
+				userId,
+			});
+		} else {
+			return res
+				.status(400)
+				.json({ message: 'dashboardId or dashboardName is required' });
+		}
+
+		await dashboard.save();
+
+		res
+			.status(201)
+			.json({ message: 'Dashboard processed successfully', dashboard });
+	} catch (error) {
+		console.error('Error in createOrUpdateDashboard:', {
+			message: error.message,
+			stack: error.stack,
+			fileName: req.file?.originalname,
+			fileType: req.file?.mimetype,
+		});
+		res.status(500).json({ error: error.message });
+	}
+};
+
+function removeEmptyOrCommaLines(text) {
+	return text
+		.split('\n')
+		.filter((line) => {
+			const trimmed = line.trim();
+			return trimmed !== '' && trimmed !== ',';
+		})
+		.join('\n');
+}
+
+function removeExcessiveRepetitions(text, MAX_REPEAT_COUNT = 3) {
+	const lines = text.split('\n');
+	const cleanedLines = [];
+	let lastLine = null;
+	let repeatCount = 0;
+	for (const line of lines) {
+		if (line === lastLine) {
+			repeatCount++;
+			if (repeatCount <= MAX_REPEAT_COUNT) {
+				cleanedLines.push(line);
+			}
+		} else {
+			lastLine = line;
+			repeatCount = 1;
+			cleanedLines.push(line);
+		}
+	}
+	return cleanedLines.join('\n');
 }

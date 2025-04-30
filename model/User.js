@@ -7,7 +7,7 @@ const Schema = mongoose.Schema;
 const subscriptionSchema = new Schema({
 	planId: {
 		type: String,
-		enum: ['Monthly', 'Yearly'],
+		enum: ['Free', 'Monthly', 'Yearly'],
 		default: 'Free',
 	},
 	role: {
