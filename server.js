@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 import 'dotenv/config';
+import compression from 'compression';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { corsOptions } from './config/corsOptions.js';
@@ -38,7 +39,7 @@ connectDB();
 
 app.use(logger);
 app.use(credentials);
-
+app.use(compression());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(errorHandler);

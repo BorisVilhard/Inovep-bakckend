@@ -132,18 +132,15 @@ const userSchema = new Schema(
 
 // Pre-save Hook
 userSchema.pre('save', async function (next) {
-	// Hash password if modified and not already hashed
 	if (this.isModified('password') && !this.password.startsWith('$')) {
 		const salt = await bcrypt.genSalt(10);
 		this.password = await bcrypt.hash(this.password, salt);
 	}
 
-	// Set initial tokens for new users
 	if (this.isNew) {
 		this.tokens = this.subscription.tokensPerMonth || 1;
 	}
 
-	// Validate company details: regNumber and registeredAddress must both be provided or neither
 	const regNumberProvided = !!this.regNumber && this.regNumber.trim() !== '';
 	const registeredAddressProvided =
 		!!this.registeredAddress && this.registeredAddress.trim() !== '';
@@ -174,7 +171,6 @@ userSchema.methods.clearVerificationCode = function () {
 	return this.save();
 };
 
-// Virtuals
 userSchema.virtual('isCompany').get(function () {
 	const hasCompanyRole =
 		this.subscription && this.subscription.role === 'company';
@@ -182,11 +178,9 @@ userSchema.virtual('isCompany').get(function () {
 	return hasCompanyRole || hasCompanyDetails;
 });
 
-// Schema Options
 userSchema.set('toJSON', { virtuals: true });
 userSchema.set('toObject', { virtuals: true });
 
-// Indexes
 userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ stripeCustomerId: 1 });
 
