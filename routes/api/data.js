@@ -24,7 +24,7 @@ import {
 import verifyJWT from '../../middleware/verifyJWT.js';
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage() }); // Use memory storage
+const upload = multer({ storage: multer.memoryStorage() });
 
 // Apply JWT verification middleware to all routes
 router.use(verifyJWT);
@@ -109,6 +109,16 @@ router.delete(
 	'/users/:id/dashboard/:dashboardId/file/:fileName',
 	verifyUserOwnership,
 	deleteDataByFileName
+);
+
+// Route for dry-run deletion (to match existing frontend URL)
+router.delete(
+	'/users/:id/dashboard/:dashboardId/file/:fileName/dry-run',
+	verifyUserOwnership,
+	(req, res, next) => {
+		req.query.dryRun = 'true'; // Redirect to deleteDataByFileName with dryRun=true
+		deleteDataByFileName(req, res, next);
+	}
 );
 
 // CombinedChart routes

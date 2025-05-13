@@ -51,7 +51,7 @@ const logger = winston.createLogger({
 });
 
 // In-memory store for chunks
-const chunkStore = new Map(); // { chunkId: { chunks: Buffer[], totalChunks: number, fileName: string, fileType: string } }
+const chunkStore = new Map();
 
 // Promisified exec for backups
 const execAsync = promisify(exec);
@@ -310,16 +310,12 @@ export const deleteDashboard = async (req, res) => {
 			logger.error('Background backup failed', { error: err.message })
 		);
 
-		// Delete GridFS files in parallel
+		// Delete GridFS files in parallel without retries
 		const deleteFilePromises = dashboard.files
 			.filter((file) => file.fileId && file.isChunked)
 			.map(async (file) => {
 				try {
-					await retry(
-						async () =>
-							await gfs.delete(new mongoose.Types.ObjectId(file.fileId)),
-						{ retries: 3, minTimeout: 1000 }
-					);
+					await gfs.delete(new mongoose.Types.ObjectId(file.fileId));
 					logger.info('GridFS file deleted', { fileId: file.fileId });
 				} catch (err) {
 					gridFSDeletionErrors.inc();
@@ -356,55 +352,132 @@ export const deleteDashboard = async (req, res) => {
 
 /**
  * DELETE /users/:id/dashboard/:dashboardId/file/:fileName
- * Removes data associated with a file from the dashboard.
+ * Removes data associated with a file from the dashboard or performs a dry-run.
  */
 export const deleteDataByFileName = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, fileName } = req.params;
+	const { dryRun, confirm } = req.query;
 	const startTime = Date.now();
 
 	try {
+		// Validate inputs
 		if (
 			!mongoose.Types.ObjectId.isValid(userId) ||
 			!mongoose.Types.ObjectId.isValid(dashboardId)
 		) {
+			logger.error('Invalid userId or dashboardId', { userId, dashboardId });
 			return res.status(400).json({ message: 'Invalid userId or dashboardId' });
 		}
 		if (!fileName || fileName === 'undefined') {
+			logger.error('Invalid fileName', { fileName });
 			return res
 				.status(400)
 				.json({ message: 'File name is required and cannot be undefined' });
 		}
 
+		// Fetch dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
+			logger.error('Dashboard not found', { userId, dashboardId });
 			return res
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
 
+		// Check for file
 		const file = dashboard.files.find((f) => f.filename === fileName);
 		if (!file) {
+			logger.error('File not found in dashboard', {
+				userId,
+				dashboardId,
+				fileName,
+			});
 			return res.status(404).json({
 				message: `File ${fileName} not found in dashboard ${dashboardId}`,
 			});
 		}
 
-		// Asynchronous backup for large files
-		if (file.chunkCount >= 10) {
-			backupDatabase().catch((err) =>
-				logger.error('Background backup failed', { error: err.message })
+		// Count affected charts, entries, and categories
+		let affectedCharts = 0;
+		let affectedEntries = 0;
+		const affectedCategories = new Set();
+		dashboard.dashboardData.forEach((category) => {
+			let categoryHasFileData = false;
+
+			// Check mainData
+			category.mainData.forEach((chart) => {
+				const entries = chart.data.filter(
+					(entry) => entry.fileName === fileName
+				);
+				if (entries.length > 0) {
+					affectedCharts++;
+					affectedEntries += entries.length;
+					categoryHasFileData = true;
+				}
+			});
+
+			// Check combinedData
+			category.combinedData.forEach((chart) => {
+				const entries = chart.data.filter(
+					(entry) => entry.fileName === fileName
+				);
+				if (entries.length > 0) {
+					affectedCharts++;
+					affectedEntries += entries.length;
+					categoryHasFileData = true;
+				}
+			});
+
+			// Check summaryData
+			const summaryEntries = category.summaryData.filter(
+				(entry) => entry.fileName === fileName
 			);
+			if (summaryEntries.length > 0) {
+				affectedEntries += summaryEntries.length;
+				categoryHasFileData = true;
+			}
+
+			if (categoryHasFileData) {
+				affectedCategories.add(category.categoryName);
+			}
+		});
+
+		// Dry-run response
+		if (dryRun === 'true') {
+			logger.info('Dry-run deletion preview', {
+				userId,
+				dashboardId,
+				fileName,
+				affectedCharts,
+				affectedEntries,
+				affectedCategories: Array.from(affectedCategories),
+			});
+			return res.json({
+				message: 'Dry run results',
+				affectedCharts,
+				affectedEntries,
+				affectedCategories: Array.from(affectedCategories),
+				affectedFile: file.filename,
+			});
+		}
+
+		// Actual deletion
+		if (confirm !== 'true') {
+			logger.error('Confirmation required for deletion', {
+				userId,
+				dashboardId,
+				fileName,
+			});
+			return res
+				.status(400)
+				.json({ message: 'Confirmation required for deletion' });
 		}
 
 		// Delete GridFS file if it exists
 		if (file.fileId && file.isChunked) {
 			try {
-				await retry(
-					async () =>
-						await gfs.delete(new mongoose.Types.ObjectId(file.fileId)),
-					{ retries: 3, minTimeout: 1000 }
-				);
+				await gfs.delete(new mongoose.Types.ObjectId(file.fileId));
 				logger.info('GridFS file deleted', { fileId: file.fileId, fileName });
 			} catch (err) {
 				gridFSDeletionErrors.inc();
@@ -415,135 +488,70 @@ export const deleteDataByFileName = async (req, res) => {
 			}
 		}
 
-		// Remove entries with fileName from dashboardData and files, and clean up empty charts/categories
-		const updateResult = await Dashboard.updateOne(
+		// Staged updates to remove file-related data
+		// Step 1: Remove file from files array
+		await Dashboard.updateOne(
 			{ _id: dashboardId, userId },
-			[
-				{
-					$set: {
-						dashboardData: {
-							$map: {
-								input: '$dashboardData',
-								as: 'category',
-								in: {
-									$mergeObjects: [
-										'$$category',
-										{
-											mainData: {
-												$map: {
-													input: '$$category.mainData',
-													as: 'chart',
-													in: {
-														$mergeObjects: [
-															'$$chart',
-															{
-																data: {
-																	$filter: {
-																		input: '$$chart.data',
-																		as: 'entry',
-																		cond: {
-																			$ne: ['$$entry.fileName', fileName],
-																		},
-																	},
-																},
-															},
-														],
-													},
-												},
-											},
-											combinedData: {
-												$map: {
-													input: '$$category.combinedData',
-													as: 'chart',
-													in: {
-														$mergeObjects: [
-															'$$chart',
-															{
-																data: {
-																	$filter: {
-																		input: '$$chart.data',
-																		as: 'entry',
-																		cond: {
-																			$ne: ['$$entry.fileName', fileName],
-																		},
-																	},
-																},
-															},
-														],
-													},
-												},
-											},
-										},
-									],
-								},
-							},
-						},
-						files: {
-							$filter: {
-								input: '$files',
-								as: 'file',
-								cond: { $ne: ['$$file.filename', fileName] },
-							},
-						},
-					},
+			{
+				$pull: {
+					files: { filename: fileName },
 				},
-				{
-					$set: {
-						dashboardData: {
-							$filter: {
-								input: '$dashboardData',
-								as: 'category',
-								cond: {
-									$or: [
-										{ $gt: [{ $size: '$$category.mainData' }, 0] },
-										{ $gt: [{ $size: '$$category.combinedData' }, 0] },
-									],
-								},
-							},
-						},
-					},
-				},
-			],
+			},
 			{ writeConcern: { w: 1 } }
 		);
 
-		// Count affected charts and entries
-		let affectedCharts = 0;
-		let affectedEntries = 0;
+		// Step 2: Remove categories with any data tied to fileName
+		const categoriesToRemove = [];
 		dashboard.dashboardData.forEach((category) => {
-			category.mainData.forEach((chart) => {
-				const entries = chart.data.filter(
-					(entry) => entry.fileName === fileName
-				);
-				if (entries.length > 0) {
-					affectedCharts++;
-					affectedEntries += entries.length;
-				}
-			});
-			category.combinedData.forEach((chart) => {
-				const entries = chart.data.filter(
-					(entry) => entry.fileName === fileName
-				);
-				if (entries.length > 0) {
-					affectedCharts++;
-					affectedEntries += entries.length;
-				}
-			});
+			const hasMainData = category.mainData.some((chart) =>
+				chart.data.some((entry) => entry.fileName === fileName)
+			);
+			const hasCombinedData = category.combinedData.some((chart) =>
+				chart.data.some((entry) => entry.fileName === fileName)
+			);
+			const hasSummaryData = category.summaryData.some(
+				(entry) => entry.fileName === fileName
+			);
+			if (hasMainData || hasCombinedData || hasSummaryData) {
+				categoriesToRemove.push(category.categoryName);
+			}
 		});
 
-		// Update cache asynchronously
-		const cacheUpdate = async () => {
-			const updatedDashboard = await Dashboard.findOne({
-				_id: dashboardId,
-				userId,
-			}).lean();
-			if (updatedDashboard) {
-				await setCachedDashboard(userId, dashboardId, updatedDashboard);
-			}
-		};
-		cacheUpdate().catch((err) =>
-			logger.error('Error updating cache', { error: err.message })
+		if (categoriesToRemove.length > 0) {
+			await Dashboard.updateOne(
+				{ _id: dashboardId, userId },
+				{
+					$pull: {
+						dashboardData: {
+							categoryName: { $in: categoriesToRemove },
+						},
+					},
+				},
+				{ writeConcern: { w: 1 } }
+			);
+		}
+
+		// Step 3: Clean up remaining data for fileName
+		const updateResult = await Dashboard.updateOne(
+			{ _id: dashboardId, userId },
+			{
+				$pull: {
+					'dashboardData.$[].mainData.$[].data': { fileName },
+					'dashboardData.$[].combinedData.$[].data': { fileName },
+					'dashboardData.$[].summaryData': { fileName },
+				},
+			},
+			{ writeConcern: { w: 1 } }
 		);
+
+		// Fetch updated dashboard
+		const updatedDashboard = await Dashboard.findOne({
+			_id: dashboardId,
+			userId,
+		}).lean();
+		if (updatedDashboard) {
+			await setCachedDashboard(userId, dashboardId, updatedDashboard);
+		}
 
 		const duration = (Date.now() - startTime) / 1000;
 		deletionDuration.set(duration);
@@ -553,6 +561,7 @@ export const deleteDataByFileName = async (req, res) => {
 			fileName,
 			affectedCharts,
 			affectedEntries,
+			affectedCategories: Array.from(affectedCategories),
 			modified: updateResult.modifiedCount,
 			duration,
 		});
@@ -561,7 +570,9 @@ export const deleteDataByFileName = async (req, res) => {
 			message: 'Data deleted successfully',
 			affectedCharts,
 			affectedEntries,
+			affectedCategories: Array.from(affectedCategories),
 			modified: updateResult.modifiedCount > 0,
+			dashboard: updatedDashboard || {},
 		});
 	} catch (error) {
 		logger.error('Error deleting data by fileName', {
@@ -575,10 +586,6 @@ export const deleteDataByFileName = async (req, res) => {
 	}
 };
 
-/**
- * DELETE /users/:id/dashboard/:dashboardId/file/:fileName/dry-run
- * Simulates deletion of data by fileName and returns affected data counts.
- */
 export const dryRunDeleteDataByFileName = async (req, res) => {
 	const { id: userId, dashboardId, fileName } = req.params;
 
@@ -885,7 +892,6 @@ export const deleteDashboardCategory = async (req, res) => {
 			.json({ message: error.message });
 	}
 };
-
 /**
  * DELETE /users/:id/dashboards/condition
  * Deletes dashboards matching a condition (e.g., expired files or custom query).
@@ -926,15 +932,12 @@ export const deleteLargeDataByCondition = async (req, res) => {
 			.filter((file) => file.fileId && file.isChunked)
 			.map((file) => new mongoose.Types.ObjectId(file.fileId));
 
-		// Delete GridFS files in parallel
+		// Delete GridFS files in parallel without retries
 		let deletedFiles = 0;
 		if (fileIds.length > 0) {
 			const deletePromises = fileIds.map(async (fileId) => {
 				try {
-					await retry(async () => await gfs.delete(fileId), {
-						retries: 3,
-						minTimeout: 1000,
-					});
+					await gfs.delete(fileId); // Single attempt, no retries
 					return 1;
 				} catch (err) {
 					gridFSDeletionErrors.inc();
@@ -1376,32 +1379,142 @@ export const updateCategoryData = async (req, res) => {
 	const userId = req.params.id;
 	const { dashboardId, categoryName } = req.params;
 	const { combinedData, summaryData, appliedChartType, checkedIds } = req.body;
+
 	try {
+		// Validate inputs
 		if (
 			!mongoose.Types.ObjectId.isValid(userId) ||
 			!mongoose.Types.ObjectId.isValid(dashboardId)
 		) {
+			logger.error('Invalid userId or dashboardId', { userId, dashboardId });
 			return res.status(400).json({ message: 'Invalid userId or dashboardId' });
 		}
+		if (!categoryName) {
+			logger.error('Category name is required', { userId, dashboardId });
+			return res.status(400).json({ message: 'Category name is required' });
+		}
+		if (!combinedData && !summaryData && !appliedChartType && !checkedIds) {
+			logger.error('At least one field is required', {
+				userId,
+				dashboardId,
+				categoryName,
+			});
+			return res.status(400).json({
+				message:
+					'At least one field (combinedData, summaryData, appliedChartType, or checkedIds) is required',
+			});
+		}
 
+		// Fetch dashboard
 		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
 		if (!dashboard) {
+			logger.error('Dashboard not found', { userId, dashboardId });
 			return res
 				.status(404)
 				.json({ message: `Dashboard ID ${dashboardId} not found` });
 		}
 
+		// Find category
 		const category = dashboard.dashboardData.find(
 			(cat) => cat.categoryName === categoryName
 		);
 		if (!category) {
+			logger.error('Category not found', { userId, dashboardId, categoryName });
 			return res
 				.status(404)
 				.json({ message: `Category ${categoryName} not found` });
 		}
 
-		if (combinedData) category.combinedData = combinedData;
-		if (summaryData) category.summaryData = summaryData;
+		// Validate and update fields
+		if (combinedData) {
+			if (!Array.isArray(combinedData)) {
+				logger.error('Invalid combinedData format', {
+					userId,
+					dashboardId,
+					categoryName,
+				});
+				return res
+					.status(400)
+					.json({ message: 'combinedData must be an array' });
+			}
+			const validChartTypes = [
+				'EntryArea',
+				'IndexArea',
+				'EntryLine',
+				'IndexLine',
+				'TradingLine',
+				'IndexBar',
+				'Bar',
+				'Pie',
+				'Line',
+				'Radar',
+				'Area',
+			];
+			const isValidCombinedData = combinedData.every(
+				(item) =>
+					typeof item.id === 'string' &&
+					validChartTypes.includes(item.chartType) &&
+					Array.isArray(item.chartIds) &&
+					item.chartIds.length >= 2 &&
+					item.chartIds.every((id) => typeof id === 'string') &&
+					Array.isArray(item.data) &&
+					item.data.length > 0 &&
+					item.data.every(
+						(entry) =>
+							typeof entry.title === 'string' &&
+							entry.value !== undefined &&
+							entry.date instanceof Date &&
+							typeof entry.fileName === 'string'
+					)
+			);
+			if (!isValidCombinedData) {
+				logger.error('Invalid combinedData structure', {
+					userId,
+					dashboardId,
+					categoryName,
+					combinedDataSample: combinedData.slice(0, 2),
+				});
+				return res.status(400).json({
+					message:
+						'combinedData contains invalid entries; check id, chartType, chartIds, or data fields',
+				});
+			}
+			category.combinedData = combinedData;
+		}
+
+		if (summaryData) {
+			if (!Array.isArray(summaryData)) {
+				logger.error('Invalid summaryData format', {
+					userId,
+					dashboardId,
+					categoryName,
+				});
+				return res
+					.status(400)
+					.json({ message: 'summaryData must be an array' });
+			}
+			const isValidSummaryData = summaryData.every(
+				(entry) =>
+					typeof entry.title === 'string' &&
+					entry.value !== undefined &&
+					entry.date instanceof Date &&
+					typeof entry.fileName === 'string'
+			);
+			if (!isValidSummaryData) {
+				logger.error('Invalid summaryData structure', {
+					userId,
+					dashboardId,
+					categoryName,
+					summaryDataSample: summaryData.slice(0, 2),
+				});
+				return res.status(400).json({
+					message:
+						'summaryData contains invalid entries; check title, value, date, or fileName fields',
+				});
+			}
+			category.summaryData = summaryData;
+		}
+
 		if (appliedChartType) {
 			const validChartTypes = [
 				'EntryArea',
@@ -1417,6 +1530,12 @@ export const updateCategoryData = async (req, res) => {
 				'Area',
 			];
 			if (!validChartTypes.includes(appliedChartType)) {
+				logger.error('Invalid appliedChartType', {
+					userId,
+					dashboardId,
+					categoryName,
+					appliedChartType,
+				});
 				return res.status(400).json({
 					message: `Invalid appliedChartType. Must be one of: ${validChartTypes.join(
 						', '
@@ -1425,11 +1544,34 @@ export const updateCategoryData = async (req, res) => {
 			}
 			category.appliedChartType = appliedChartType;
 		}
-		if (checkedIds) category.checkedIds = checkedIds;
 
+		if (checkedIds) {
+			if (
+				!Array.isArray(checkedIds) ||
+				!checkedIds.every((id) => typeof id === 'string')
+			) {
+				logger.error('Invalid checkedIds format', {
+					userId,
+					dashboardId,
+					categoryName,
+				});
+				return res
+					.status(400)
+					.json({ message: 'checkedIds must be an array of strings' });
+			}
+			category.checkedIds = checkedIds;
+		}
+
+		// Save dashboard
 		await dashboard.save();
 		const dashboardObj = dashboard.toObject();
 		await setCachedDashboard(userId, dashboardId, dashboardObj);
+
+		logger.info('Category data updated successfully', {
+			userId,
+			dashboardId,
+			categoryName,
+		});
 
 		res.json({
 			message: 'Category data updated successfully',
@@ -2368,9 +2510,6 @@ export const checkAndUpdateMonitoredFiles = async (req, res) => {
 	}
 };
 
-/**
- * Helper: Fetches file content from Google Drive.
- */
 async function fetchFileContent(fileId, authClient) {
 	const drive = google.drive({ version: 'v3', auth: authClient });
 	try {
@@ -2380,22 +2519,15 @@ async function fetchFileContent(fileId, authClient) {
 
 		if (mimeType === 'application/vnd.google-apps.document') {
 			const docs = google.docs({ version: 'v1', auth: authClient });
-			const docResp = await retry(
-				async () => await docs.documents.get({ documentId: fileId }),
-				{ retries: 3, minTimeout: 1000 }
-			);
+			const docResp = await docs.documents.get({ documentId: fileId });
 			fileContent = extractPlainText(docResp.data);
 		} else if (
 			mimeType === 'text/csv' ||
 			mimeType === 'application/vnd.google-apps.spreadsheet'
 		) {
-			const csvResp = await retry(
-				async () =>
-					await drive.files.export(
-						{ fileId, mimeType: 'text/csv' },
-						{ responseType: 'arraybuffer' }
-					),
-				{ retries: 3, minTimeout: 1000 }
+			const csvResp = await drive.files.export(
+				{ fileId, mimeType: 'text/csv' },
+				{ responseType: 'arraybuffer' }
 			);
 			fileContent = Buffer.from(csvResp.data).toString('utf8');
 		} else if (
@@ -2403,13 +2535,9 @@ async function fetchFileContent(fileId, authClient) {
 				'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
 			mimeType === 'application/vnd.ms-excel'
 		) {
-			const xlsxResp = await retry(
-				async () =>
-					await drive.files.get(
-						{ fileId, alt: 'media' },
-						{ responseType: 'arraybuffer' }
-					),
-				{ retries: 3, minTimeout: 1000 }
+			const xlsxResp = await drive.files.get(
+				{ fileId, alt: 'media' },
+				{ responseType: 'arraybuffer' }
 			);
 			const workbook = xlsx.read(new Uint8Array(xlsxResp.data), {
 				type: 'array',
@@ -2418,13 +2546,9 @@ async function fetchFileContent(fileId, authClient) {
 				xlsx.utils.sheet_to_csv(workbook.Sheets[sheetName])
 			).join('\n\n');
 		} else if (mimeType === 'text/plain') {
-			const textResp = await retry(
-				async () =>
-					await drive.files.get(
-						{ fileId, alt: 'media' },
-						{ responseType: 'stream' }
-					),
-				{ retries: 3, minTimeout: 1000 }
+			const textResp = await drive.files.get(
+				{ fileId, alt: 'media' },
+				{ responseType: 'stream' }
 			);
 			fileContent = await new Promise((resolve, reject) => {
 				let data = '';
@@ -2452,6 +2576,7 @@ async function fetchFileContent(fileId, authClient) {
 		throw error;
 	}
 }
+
 async function processFileContent(fullText, fileName) {
 	try {
 		let data;
