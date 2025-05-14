@@ -1,7 +1,39 @@
 import mongoose from 'mongoose';
 import { GridFSBucket } from 'mongodb';
+import Queue from 'bull';
+import winston from 'winston';
+import {
+	getCachedDashboard,
+	setCachedDashboard,
+	deleteCachedDashboard,
+} from '../utils/cache.js';
 
-// Valid chart types for chartType field
+// Logger configuration
+const logger = winston.createLogger({
+	level: 'info',
+	format: winston.format.combine(
+		winston.format.timestamp(),
+		winston.format.json()
+	),
+	transports: [
+		new winston.transports.Console(),
+		new winston.transports.File({ filename: 'error.log', level: 'error' }),
+		new winston.transports.File({ filename: 'combined.log' }),
+	],
+});
+
+// Redis configuration for Bull queue
+const REDIS_URL =
+	process.env.UPSTASH_REDIS_REST_URL || 'https://crack-vervet-30777.upstash.io';
+const REDIS_TOKEN =
+	process.env.UPSTASH_REDIS_REST_TOKEN || 'YOUR_UPSTASH_REDIS_TOKEN';
+
+// Background job queue for GridFS deletions
+const deletionQueue = new Queue('gridfs-deletion', {
+	redis: { url: REDIS_URL, password: REDIS_TOKEN },
+});
+
+// Valid chart types
 const validChartTypes = [
 	'EntryArea',
 	'IndexArea',
@@ -88,12 +120,12 @@ const DashboardCategorySchema = new mongoose.Schema(
 	{ _id: false }
 );
 
-// Schema for file data (embedded in Dashboard)
+// Schema for file data
 const FileDataSchema = new mongoose.Schema(
 	{
-		fileId: { type: String, trim: true }, // For GridFS or cloud file ID
+		fileId: { type: String, trim: true },
 		filename: { type: String, required: true, trim: true, maxlength: 255 },
-		content: { type: Buffer, required: false }, // Added for BSON storage
+		content: { type: Buffer, required: false },
 		lastUpdate: { type: Date, default: Date.now },
 		source: { type: String, enum: ['local', 'google'], default: 'local' },
 		isChunked: { type: Boolean, default: false },
@@ -107,6 +139,18 @@ const FileDataSchema = new mongoose.Schema(
 	{ _id: true }
 );
 
+// Schema for dashboard data reference
+const DashboardDataRefSchema = new mongoose.Schema(
+	{
+		fileId: { type: String, required: true, trim: true },
+		filename: { type: String, required: true, trim: true, maxlength: 255 },
+		isChunked: { type: Boolean, default: true },
+		chunkCount: { type: Number, default: 1, min: 1 },
+		lastUpdate: { type: Date, default: Date.now },
+	},
+	{ _id: false }
+);
+
 // Dashboard Schema
 const DashboardSchema = new mongoose.Schema(
 	{
@@ -117,10 +161,7 @@ const DashboardSchema = new mongoose.Schema(
 			maxlength: 100,
 			index: true,
 		},
-		dashboardData: {
-			type: [DashboardCategorySchema],
-			default: [],
-		},
+		dashboardDataRef: { type: DashboardDataRefSchema, default: null },
 		files: [FileDataSchema],
 		userId: {
 			type: mongoose.Schema.Types.ObjectId,
@@ -144,331 +185,313 @@ const DashboardSchema = new mongoose.Schema(
 	}
 );
 
-// Indexes for performance
+// Indexes
 DashboardSchema.index({ userId: 1, _id: 1 });
 DashboardSchema.index({ userId: 1, dashboardName: 1 });
 DashboardSchema.index({ 'files.filename': 1 });
-DashboardSchema.index({ 'dashboardData.mainData.data.fileName': 1 });
-DashboardSchema.index({ 'dashboardData.combinedData.data.fileName': 1 }); // Added for combinedData
-DashboardSchema.index({ 'dashboardData.categoryName': 1 });
-DashboardSchema.index({ 'dashboardData.mainData.id': 1 });
+DashboardSchema.index({ 'dashboardDataRef.filename': 1 });
 DashboardSchema.index(
 	{ 'files.monitoring.status': 1, 'files.monitoring.expireDate': 1 },
 	{ partialFilterExpression: { 'files.monitoring.status': 'expired' } }
 );
 
-// Pre-save middleware to update timestamps
+// Pre-save middleware
 DashboardSchema.pre('save', function (next) {
 	this.updatedAt = new Date();
 	next();
 });
 
-// Pre-remove middleware to clean up GridFS files
+// Pre-remove middleware
 DashboardSchema.pre('remove', async function (next) {
 	try {
 		const gfs = new GridFSBucket(mongoose.connection.db, {
 			bucketName: 'Uploads',
 		});
-		const fileIds = this.files
+		const fileIds = [];
+		if (this.dashboardDataRef?.fileId && this.dashboardDataRef?.isChunked) {
+			fileIds.push(new mongoose.Types.ObjectId(this.dashboardDataRef.fileId));
+		}
+		this.files
 			.filter((file) => file.fileId && file.isChunked)
-			.map((file) => new mongoose.Types.ObjectId(file.fileId));
+			.forEach((file) =>
+				fileIds.push(new mongoose.Types.ObjectId(file.fileId))
+			);
 
 		if (fileIds.length > 0) {
-			await Promise.all(
-				fileIds.map(async (fileId) => {
-					try {
-						await gfs.delete(fileId);
-					} catch (err) {
-						console.warn(
-							`Error deleting GridFS file ${fileId}: ${err.message}`
-						);
-					}
-				})
-			);
+			await deletionQueue.add({ fileIds }, { attempts: 3 });
+			logger.info('Queued GridFS deletions for dashboard removal', {
+				dashboardId: this._id,
+				fileCount: fileIds.length,
+			});
 		}
 		next();
 	} catch (err) {
+		logger.error('Error in pre-remove middleware', {
+			dashboardId: this._id,
+			error: err.message,
+		});
 		next(err);
 	}
 });
 
-// Static method to delete entire dashboardData
-DashboardSchema.statics.deleteDashboardData = async function (dashboardId) {
-	try {
-		const start = Date.now();
-		const gfs = new GridFSBucket(mongoose.connection.db, {
-			bucketName: 'Uploads',
+// Retrieve dashboard data from GridFS
+DashboardSchema.methods.getDashboardData = async function () {
+	if (!this.dashboardDataRef?.fileId || !this.dashboardDataRef?.isChunked) {
+		logger.warn('No dashboard data reference found', {
+			dashboardId: this._id,
 		});
+		return [];
+	}
+	const gfs = new GridFSBucket(mongoose.connection.db, {
+		bucketName: 'Uploads',
+	});
+	try {
+		const downloadStream = gfs.openDownloadStream(
+			new mongoose.Types.ObjectId(this.dashboardDataRef.fileId)
+		);
+		let data = '';
+		for await (const chunk of downloadStream) {
+			data += chunk.toString('utf8');
+		}
+		return JSON.parse(data);
+	} catch (err) {
+		logger.error('Error retrieving dashboard data from GridFS', {
+			dashboardId: this._id,
+			fileId: this.dashboardDataRef.fileId,
+			error: err.message,
+		});
+		return []; // Return empty array instead of throwing
+	}
+};
 
+// Cache dashboard metadata
+DashboardSchema.statics.cacheDashboardMetadata = async function (
+	userId,
+	dashboardId
+) {
+	try {
 		const dashboard = await this.findById(dashboardId, {
-			'dashboardData.mainData.data.fileName': 1,
-			'dashboardData.combinedData.data.fileName': 1,
+			'dashboardDataRef.filename': 1,
+			'dashboardDataRef.fileId': 1,
 			files: 1,
 		}).lean();
 
 		if (!dashboard) {
-			throw new Error('Dashboard not found');
+			logger.warn('Dashboard not found for metadata caching', {
+				dashboardId,
+				userId,
+			});
+			return false;
 		}
 
-		const fileNames = new Set();
-		const fileIds = new Set();
-
-		dashboard.dashboardData.forEach((category) => {
-			category.mainData?.forEach((entry) => {
-				if (entry.data) {
-					entry.data.forEach((item) => fileNames.add(item.fileName));
-				}
-			});
-			category.combinedData?.forEach((chart) => {
-				if (chart.data) {
-					chart.data.forEach((item) => fileNames.add(item.fileName));
-				}
-			});
-		});
+		const fileNames = new Set(
+			[dashboard.dashboardDataRef?.filename].filter(Boolean)
+		);
+		const fileIds = new Set(
+			[dashboard.dashboardDataRef?.fileId].filter(Boolean)
+		);
 		dashboard.files?.forEach((file) => {
 			if (file.fileId && file.isChunked) {
 				fileIds.add(file.fileId);
 			}
 		});
 
-		const deleteFilePromises = [...fileIds].map(async (fileId) => {
-			try {
-				await gfs.delete(new mongoose.Types.ObjectId(fileId));
-				return 1;
-			} catch (err) {
-				console.warn(`Failed to delete GridFS file ${fileId}: ${err.message}`);
-				return 0;
-			}
+		const metadata = {
+			fileNames: [...fileNames],
+			fileIds: [...fileIds],
+		};
+
+		// Check metadata size before caching
+		const metadataJson = JSON.stringify(metadata);
+		const sizeInBytes = Buffer.byteLength(metadataJson, 'utf8');
+		const MAX_CACHE_SIZE = 5 * 1024 * 1024; // 5MB threshold
+		if (sizeInBytes > MAX_CACHE_SIZE) {
+			logger.info('Metadata too large to cache', {
+				userId,
+				dashboardId,
+				sizeInBytes,
+				maxSize: MAX_CACHE_SIZE,
+			});
+			return false;
+		}
+
+		const wasCached = await setCachedDashboard(
+			userId,
+			`${dashboardId}:metadata`,
+			metadata
+		);
+		if (!wasCached) {
+			logger.info('Metadata too large to cache via setCachedDashboard', {
+				userId,
+				dashboardId,
+				sizeInBytes,
+			});
+			return false;
+		}
+
+		logger.info('Cached dashboard metadata', {
+			userId,
+			dashboardId,
+			fileCount: fileIds.size,
+			sizeInBytes,
 		});
-		const deletedFiles = (await Promise.all(deleteFilePromises)).reduce(
-			(sum, count) => sum + count,
-			0
-		);
-
-		const result = await this.updateOne(
-			{ _id: dashboardId },
-			[
-				{
-					$set: {
-						dashboardData: [],
-						files: {
-							$filter: {
-								input: '$files',
-								as: 'file',
-								cond: { $not: { $in: ['$$file.fileId', [...fileIds]] } },
-							},
-						},
-					},
-				},
-			],
-			{ writeConcern: { w: 1 } }
-		);
-
-		console.log(
-			`Deletion took: ${Date.now() - start}ms, Deleted files: ${deletedFiles}`
-		);
-		return { modifiedCount: result.modifiedCount, deletedFiles };
+		return true;
 	} catch (err) {
-		console.error(`Error deleting dashboardData: ${err.message}`);
-		throw err;
+		logger.error('Error caching dashboard metadata', {
+			userId,
+			dashboardId,
+			error: err.message,
+		});
+		return false;
 	}
 };
 
-// Static method to delete specific category
-DashboardSchema.statics.deleteDashboardCategory = async function (
-	dashboardId,
-	categoryName
+// Get cached metadata
+DashboardSchema.statics.getCachedMetadata = async function (
+	userId,
+	dashboardId
 ) {
 	try {
-		const start = Date.now();
-		const gfs = new GridFSBucket(mongoose.connection.db, {
-			bucketName: 'Uploads',
+		const metadata = await getCachedDashboard(
+			userId,
+			`${dashboardId}:metadata`
+		);
+		if (metadata) {
+			logger.info('Redis cache hit for metadata', { userId, dashboardId });
+		} else {
+			logger.info('Redis cache miss for metadata', { userId, dashboardId });
+		}
+		return metadata;
+	} catch (err) {
+		logger.error('Error retrieving cached metadata', {
+			userId,
+			dashboardId,
+			error: err.message,
 		});
+		return null;
+	}
+};
+
+// Background job to delete GridFS files
+deletionQueue.process(async (job) => {
+	const { fileIds } = job.data;
+	const gfs = new GridFSBucket(mongoose.connection.db, {
+		bucketName: 'Uploads',
+	});
+
+	const BATCH_SIZE = 500;
+	try {
+		const fileObjectIds = fileIds.map((id) => new mongoose.Types.ObjectId(id));
+		await mongoose.connection.db.collection('fs.files').deleteMany({
+			_id: { $in: fileObjectIds },
+		});
+		await mongoose.connection.db.collection('fs.chunks').deleteMany({
+			files_id: { $in: fileObjectIds },
+		});
+		logger.info('Completed GridFS deletion job', {
+			jobId: job.id,
+			fileCount: fileIds.length,
+		});
+	} catch (err) {
+		logger.error('Error in GridFS deletion job', {
+			jobId: job.id,
+			error: err.message,
+		});
+		throw err;
+	}
+});
+
+// Optimized deleteDashboardData
+DashboardSchema.statics.deleteDashboardData = async function (
+	dashboardId,
+	userId
+) {
+	const start = Date.now();
+	try {
+		if (
+			!mongoose.Types.ObjectId.isValid(dashboardId) ||
+			!mongoose.Types.ObjectId.isValid(userId)
+		) {
+			logger.error('Invalid dashboardId or userId', { dashboardId, userId });
+			throw new Error('Invalid dashboardId or userId');
+		}
 
 		const dashboard = await this.findOne(
-			{ _id: dashboardId, 'dashboardData.categoryName': categoryName },
-			{ 'dashboardData.$': 1, files: 1 }
+			{ _id: dashboardId, userId },
+			{
+				'dashboardDataRef.fileId': 1,
+				'dashboardDataRef.isChunked': 1,
+				files: 1,
+			}
 		).lean();
 
 		if (!dashboard) {
-			throw new Error('Category not found');
+			logger.error('Dashboard not found', { dashboardId, userId });
+			throw new Error('Dashboard not found');
 		}
 
-		const category = dashboard.dashboardData[0];
-		const fileNames = new Set();
-		const fileIds = new Set();
-
-		category.mainData?.forEach((entry) => {
-			if (entry.data) {
-				entry.data.forEach((item) => fileNames.add(item.fileName));
-			}
-		});
-		category.combinedData?.forEach((chart) => {
-			if (chart.data) {
-				chart.data.forEach((item) => fileNames.add(item.fileName));
-			}
-		});
+		const fileIds = [];
+		if (
+			dashboard.dashboardDataRef?.fileId &&
+			dashboard.dashboardDataRef?.isChunked
+		) {
+			fileIds.push(dashboard.dashboardDataRef.fileId);
+		}
 		dashboard.files?.forEach((file) => {
-			if (file.fileId && file.isChunked && fileNames.has(file.filename)) {
-				fileIds.add(file.fileId);
+			if (file.fileId && file.isChunked) {
+				fileIds.push(file.fileId);
 			}
 		});
-
-		const deleteFilePromises = [...fileIds].map(async (fileId) => {
-			try {
-				await gfs.delete(new mongoose.Types.ObjectId(fileId));
-				return 1;
-			} catch (err) {
-				console.warn(`Failed to delete GridFS file ${fileId}: ${err.message}`);
-				return 0;
-			}
-		});
-		const deletedFiles = (await Promise.all(deleteFilePromises)).reduce(
-			(sum, count) => sum + count,
-			0
-		);
 
 		const result = await this.updateOne(
-			{ _id: dashboardId },
-			[
-				{
-					$set: {
-						dashboardData: {
-							$filter: {
-								input: '$dashboardData',
-								as: 'category',
-								cond: { $ne: ['$$category.categoryName', categoryName] },
-							},
-						},
-						files: {
-							$filter: {
-								input: '$files',
-								as: 'file',
-								cond: { $not: { $in: ['$$file.fileId', [...fileIds]] } },
-							},
-						},
-					},
-				},
-			],
-			{ writeConcern: { w: 1 } }
+			{ _id: dashboardId, userId },
+			{ $set: { dashboardDataRef: null, files: [] } },
+			{ writeConcern: { w: 0 } }
 		);
 
-		console.log(
-			`Category deletion took: ${
-				Date.now() - start
-			}ms, Deleted files: ${deletedFiles}`
-		);
-		return { modifiedCount: result.modifiedCount, deletedFiles };
-	} catch (err) {
-		console.error(`Error deleting category: ${err.message}`);
-		throw err;
-	}
-};
-
-// Static method to delete large data and associated GridFS files
-DashboardSchema.statics.deleteLargeData = async function (
-	userId,
-	dashboardName = null
-) {
-	try {
-		if (!mongoose.Types.ObjectId.isValid(userId)) {
-			throw new Error('Invalid userId');
-		}
-
-		const query = { userId: new mongoose.Types.ObjectId(userId) };
-		if (dashboardName) {
-			query.dashboardName = dashboardName;
-		}
-
-		const dashboards = await this.find(query, { files: 1 }).lean();
-		const fileIds = dashboards
-			.flatMap((dashboard) => dashboard.files || [])
-			.filter((file) => file.fileId && file.isChunked)
-			.map((file) => new mongoose.Types.ObjectId(file.fileId));
-
-		let deletedFiles = 0;
-		const gfs = new GridFSBucket(mongoose.connection.db, {
-			bucketName: 'Uploads',
-		});
+		let queuedFiles = 0;
 		if (fileIds.length > 0) {
-			const deletePromises = fileIds.map(async (fileId) => {
-				try {
-					await gfs.delete(fileId);
-					return 1;
-				} catch (err) {
-					console.warn(
-						`Failed to delete GridFS file ${fileId}: ${err.message}`
-					);
-					return 0;
-				}
+			await deletionQueue.add(
+				{ fileIds },
+				{ attempts: 3, backoff: { type: 'exponential', delay: 1000 } }
+			);
+			queuedFiles = fileIds.length;
+			logger.info('Queued GridFS deletions', {
+				dashboardId,
+				userId,
+				fileCount: queuedFiles,
 			});
-			const results = await Promise.all(deletePromises);
-			deletedFiles = results.reduce((sum, count) => sum + count, 0);
 		}
 
-		const { deletedCount } = await this.deleteMany(query);
+		await Promise.all([
+			deleteCachedDashboard(userId, dashboardId),
+			deleteCachedDashboard(userId, `${dashboardId}:metadata`),
+		]);
 
-		return { deletedDashboards: deletedCount, deletedFiles };
-	} catch (err) {
-		console.error(`Error deleting data: ${err.message}`);
-		throw err;
-	}
-};
-
-// Static method to clean up expired files
-DashboardSchema.statics.deleteExpiredFiles = async function () {
-	try {
-		const dashboards = await this.find(
-			{
-				'files.monitoring.status': 'expired',
-				'files.monitoring.expireDate': { $lt: new Date() },
-			},
-			{ files: 1 }
-		).lean();
-
-		const fileIds = dashboards
-			.flatMap((dashboard) => dashboard.files)
-			.filter(
-				(file) =>
-					file.monitoring.status === 'expired' && file.fileId && file.isChunked
-			)
-			.map((file) => new mongoose.Types.ObjectId(file.fileId));
-
-		let deletedFiles = 0;
-		const gfs = new GridFSBucket(mongoose.connection.db, {
-			bucketName: 'Uploads',
+		const duration = (Date.now() - start) / 1000;
+		logger.info('Dashboard data deletion completed', {
+			dashboardId,
+			userId,
+			modifiedCount: result.modifiedCount,
+			queuedFiles,
+			duration,
 		});
-		if (fileIds.length > 0) {
-			const deletePromises = fileIds.map(async (fileId) => {
-				try {
-					await gfs.delete(fileId);
-					return 1;
-				} catch (err) {
-					console.warn(
-						`Failed to delete GridFS file ${fileId}: ${err.message}`
-					);
-					return 0;
-				}
-			});
-			const results = await Promise.all(deletePromises);
-			deletedFiles = results.reduce((sum, count) => sum + count, 0);
-		}
 
-		await this.updateMany(
-			{
-				'files.monitoring.status': 'expired',
-				'files.monitoring.expireDate': { $lt: new Date() },
-			},
-			{ $pull: { files: { 'monitoring.status': 'expired' } } }
-		);
-
-		return { deletedFiles };
+		return {
+			modifiedCount: result.modifiedCount,
+			queuedFiles,
+			duration,
+		};
 	} catch (err) {
-		console.error(`Error deleting expired files: ${err.message}`);
+		logger.error('Error deleting dashboard data', {
+			dashboardId,
+			userId,
+			error: err.message,
+			stack: err.stack,
+		});
 		throw err;
 	}
 };
 
 const Dashboard = mongoose.model('Dashboard', DashboardSchema);
-
 export default Dashboard;

@@ -1,0 +1,53 @@
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T12:26:58.374Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:68248d4cbd88d957ffa01fca","level":"info","message":"Dashboard cached in Upstash Redis","timestamp":"2025-05-14T12:32:13.029Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:68248d4cbd88d957ffa01fca:metadata","level":"info","message":"Dashboard cached in Upstash Redis","timestamp":"2025-05-14T12:32:13.084Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T12:43:01.744Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T12:45:10.051Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T12:53:01.334Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T15:06:53.642Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824b2684a84fbb18728fd0f","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":226211,"timestamp":"2025-05-14T15:10:33.208Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824b2684a84fbb18728fd0f:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T15:10:33.256Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T15:30:18.367Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T15:31:55.574Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T15:37:01.553Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T15:47:30.914Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824bb44dc440672e130a085","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1270203,"timestamp":"2025-05-14T15:48:21.389Z"}
+{"dashboardId":"6824bb44dc440672e130a085:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T15:48:21.414Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824bb44dc440672e130a085:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T15:48:21.436Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824bb74dc440672e130a08e","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1960135,"timestamp":"2025-05-14T15:49:09.064Z"}
+{"dashboardId":"6824bb74dc440672e130a08e:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T15:49:09.091Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824bb74dc440672e130a08e:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T15:49:09.119Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T16:48:05.804Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T16:53:01.705Z","url":"https://crack-vervet-30777.upstash.io"}
+{"dashboardId":"6824ca837e52be69dc6253c8","level":"info","message":"Caching small object","sizeInBytes":1102,"timestamp":"2025-05-14T16:53:23.293Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824ca837e52be69dc6253c8","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1102,"timestamp":"2025-05-14T16:53:23.317Z"}
+{"dashboardId":"6824ca837e52be69dc6253c8:metadata","level":"info","message":"Caching small object","sizeInBytes":120,"timestamp":"2025-05-14T16:53:23.338Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824ca837e52be69dc6253c8:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":120,"timestamp":"2025-05-14T16:53:23.360Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824caba7e52be69dc6253cf","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1270209,"timestamp":"2025-05-14T16:54:19.046Z"}
+{"dashboardId":"6824caba7e52be69dc6253cf:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T16:54:19.069Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824caba7e52be69dc6253cf:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T16:54:19.090Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T17:07:14.321Z","url":"https://crack-vervet-30777.upstash.io"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T17:14:23.579Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824cf7f52dde0b376d62bb4","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1270208,"timestamp":"2025-05-14T17:14:40.176Z"}
+{"dashboardId":"6824cf7f52dde0b376d62bb4:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T17:14:40.238Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824cf7f52dde0b376d62bb4:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T17:14:40.259Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T17:15:02.819Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824cfccfef1393d904a04ea","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1122017,"timestamp":"2025-05-14T17:15:57.740Z"}
+{"dashboardId":"6824cfccfef1393d904a04ea:metadata","level":"info","message":"Caching small object","sizeInBytes":120,"timestamp":"2025-05-14T17:15:57.761Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824cfccfef1393d904a04ea:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":120,"timestamp":"2025-05-14T17:15:57.784Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d067fef1393d904a04f1","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1960138,"timestamp":"2025-05-14T17:18:32.863Z"}
+{"dashboardId":"6824d067fef1393d904a04f1:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T17:18:32.926Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d067fef1393d904a04f1:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T17:18:32.948Z"}
+{"level":"info","message":"Upstash Redis client initialized successfully.","timestamp":"2025-05-14T17:19:24.522Z","url":"https://crack-vervet-30777.upstash.io"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d0bcd0d5cac590e8c2ae","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1122017,"timestamp":"2025-05-14T17:19:56.956Z"}
+{"dashboardId":"6824d0bcd0d5cac590e8c2ae:metadata","level":"info","message":"Caching small object","sizeInBytes":120,"timestamp":"2025-05-14T17:19:56.984Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d0bcd0d5cac590e8c2ae:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":120,"timestamp":"2025-05-14T17:19:57.008Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d11ed0d5cac590e8c2b5","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1960138,"timestamp":"2025-05-14T17:21:36.060Z"}
+{"dashboardId":"6824d11ed0d5cac590e8c2b5:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T17:21:36.120Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d11ed0d5cac590e8c2b5:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T17:21:36.146Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d182d0d5cac590e8c2bb","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1122021,"timestamp":"2025-05-14T17:23:15.402Z"}
+{"dashboardId":"6824d182d0d5cac590e8c2bb:metadata","level":"info","message":"Caching small object","sizeInBytes":120,"timestamp":"2025-05-14T17:23:15.425Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d182d0d5cac590e8c2bb:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":120,"timestamp":"2025-05-14T17:23:15.444Z"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d1bfd0d5cac590e8c2c2","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":1270205,"timestamp":"2025-05-14T17:24:16.676Z"}
+{"dashboardId":"6824d1bfd0d5cac590e8c2c2:metadata","level":"info","message":"Caching small object","sizeInBytes":93,"timestamp":"2025-05-14T17:24:16.737Z","userId":"68231c9a3a97b3747d9ad761"}
+{"cacheKey":"dashboard:68231c9a3a97b3747d9ad761:6824d1bfd0d5cac590e8c2c2:metadata","level":"info","message":"Data cached in Upstash Redis","sizeInBytes":93,"timestamp":"2025-05-14T17:24:16.769Z"}

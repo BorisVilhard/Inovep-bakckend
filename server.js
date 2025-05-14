@@ -1,6 +1,5 @@
 import dotenv from 'dotenv';
 dotenv.config();
-import 'dotenv/config';
 import compression from 'compression';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -18,33 +17,58 @@ import logoutRoutes from './routes/logout.js';
 import chatRoute from './routes/chat.js';
 import userRoutes from './routes/api/users.js';
 import dataRoutes from './routes/api/data.js';
-// Import necessary modules
+import dataProcessingRoutes from './routes/api/dataProcessing.js';
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
 import { Server } from 'socket.io';
 import bodyParser from 'body-parser';
-// Import route handlers
 import authRoutes from './routes/auth.js';
 import monitorRoutes from './routes/monitor.js';
+import winston from 'winston';
 
 // Initialize Express app and HTTP server
 const app = express();
 const server = http.createServer(app);
 
+// Set Mongoose strictQuery to suppress deprecation warning
+mongoose.set('strictQuery', true);
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-connectDB();
+// Winston logger for server errors
+const serverLogger = winston.createLogger({
+	level: 'info',
+	format: winston.format.combine(
+		winston.format.timestamp(),
+		winston.format.json()
+	),
+	transports: [
+		new winston.transports.Console(),
+		new winston.transports.File({ filename: 'error.log', level: 'error' }),
+		new winston.transports.File({ filename: 'combined.log' }),
+	],
+});
 
-app.use(logger);
-app.use(credentials);
-app.use(compression());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(errorHandler);
-app.use(express.urlencoded({ extended: false }));
+// Middleware setup
+app.use((req, res, next) => {
+	serverLogger.info('Incoming request', {
+		method: req.method,
+		url: req.url,
+		ip: req.ip,
+	});
+	next();
+});
+app.use(logger); // Custom request logger
+app.use(credentials); // Handle CORS credentials
+app.use(cors(corsOptions)); // Apply CORS with configured options
+app.use(compression()); // Compress responses
+app.use(bodyParser.json()); // Parse JSON bodies
+app.use(bodyParser.urlencoded({ extended: true })); // Parse URL-encoded bodies
+app.use(express.static(path.join(__dirname, 'views'))); // Serve static files (e.g., 404.html)
 
+// Socket.io setup
 const io = new Server(server, {
 	cors: {
 		origin: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -52,47 +76,58 @@ const io = new Server(server, {
 		credentials: true,
 	},
 });
+app.set('io', io); // Make io accessible in routes/controllers
 
-// Make io accessible in other modules
-app.set('io', io);
-
-// 2) Handle Socket.io connections
 io.on('connection', (socket) => {
-	console.log('A user connected:', socket.id);
+	serverLogger.info('A user connected', { socketId: socket.id });
 
-	// Optionally let clients join a room for a file ID
-	socket.on('join-file', (fileId) => {
-		socket.join(fileId);
-		console.log(`Socket ${socket.id} joined room: ${fileId}`);
+	// Join dashboard-specific room
+	socket.on('join-dashboard', ({ userId, dashboardId }) => {
+		const room = `dashboard:${userId}:${dashboardId}`;
+		socket.join(room);
+		serverLogger.info('Socket joined dashboard room', {
+			socketId: socket.id,
+			room,
+		});
 	});
 
+	// Handle disconnect
 	socket.on('disconnect', () => {
-		console.log('User disconnected:', socket.id);
+		serverLogger.info('User disconnected', { socketId: socket.id });
+	});
+
+	// Handle socket errors
+	socket.on('error', (err) => {
+		serverLogger.error('Socket error', {
+			socketId: socket.id,
+			error: err.message,
+		});
 	});
 });
 
-// 3) Middleware
-app.use(express.json());
-app.use(cors(corsOptions));
+// Routes (public)
 app.use('/', rootRoutes);
-// 4) Routes
 app.use('/auth', authRoutes);
-app.use('/api/monitor', monitorRoutes); // Final routes: /api/monitor/folder, /api/monitor/notifications, etc.
-
 app.use('/register', registerRoutes);
 app.use('/refresh', refreshRoutes);
 app.use('/logout', logoutRoutes);
 app.use('/chat', chatRoute);
-app.use('/users', userRoutes);
+app.use('/api/monitor', monitorRoutes);
 
+// Routes (mixed access)
+app.use('/users', userRoutes); // May have public and protected endpoints
+app.use('/dataProcess', dataProcessingRoutes); // Public for upload, protected for delete/get
+
+// Protected routes
 app.use(verifyJWT);
 app.use('/data', dataRoutes);
 
-// 5) Root test endpoint
+// Root test endpoint
 app.get('/', (req, res) => {
 	res.send('Google Drive Folder & File Monitor with Socket.io');
 });
 
+// Catch-all for 404 errors
 app.all('*', (req, res) => {
 	res.status(404);
 	if (req.accepts('html')) {
@@ -104,13 +139,22 @@ app.all('*', (req, res) => {
 	}
 });
 
-const PORT = 3500;
+// Error handler (must be last)
+app.use(errorHandler);
 
-server.listen(PORT, () => {
-	console.log(`Server running on port ${PORT}`);
-});
-
-// mongoose.connection.once('open', () => {
-// 	console.log('Connected to MongoDB');
-// 	app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-// });
+// Connect to MongoDB and start server
+const PORT = process.env.PORT || 3500;
+connectDB()
+	.then(() => {
+		server.listen(PORT, () => {
+			serverLogger.info(`Server running on port ${PORT}`);
+			console.log(`Server running on port ${PORT}`);
+		});
+	})
+	.catch((error) => {
+		serverLogger.error('Failed to connect to MongoDB', {
+			error: error.message,
+		});
+		console.error('Failed to connect to MongoDB:', error);
+		process.exit(1);
+	});

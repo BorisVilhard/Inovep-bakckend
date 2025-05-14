@@ -6,8 +6,6 @@ import {
 	createDashboard,
 	createOrUpdateDashboard,
 	updateDashboard,
-	deleteDashboard,
-	deleteDataByFileName,
 	verifyUserOwnership,
 	getDashboardFiles,
 	updateChartType,
@@ -16,10 +14,9 @@ import {
 	deleteCombinedChart,
 	updateCombinedChart,
 	processCloudText,
-	uploadCloudData,
-	checkAndUpdateMonitoredFiles,
 	uploadChunk,
 	finalizeChunk,
+	deleteDashboardData,
 } from '../../controllers/dataController.js';
 import verifyJWT from '../../middleware/verifyJWT.js';
 
@@ -69,12 +66,12 @@ router.post(
 	processCloudText
 );
 
-// Route to upload processed cloud data
-router.post(
-	'/users/:id/dashboard/uploadCloud',
-	verifyUserOwnership,
-	uploadCloudData
-);
+// // Route to upload processed cloud data
+// router.post(
+// 	'/users/:id/dashboard/uploadCloud',
+// 	verifyUserOwnership,
+// 	uploadCloudData
+// );
 
 // Route to get all files associated with a dashboard
 router.get(
@@ -87,8 +84,14 @@ router.get(
 router
 	.route('/users/:id/dashboard/:dashboardId')
 	.get(verifyUserOwnership, getDashboardById)
-	.put(verifyUserOwnership, updateDashboard)
-	.delete(verifyUserOwnership, deleteDashboard);
+	.put(verifyUserOwnership, updateDashboard);
+
+// Unified deletion route for all dashboard-related deletions
+router.delete(
+	'/users/:id/dashboard/delete',
+	verifyUserOwnership,
+	deleteDashboardData
+);
 
 // Route to update a specific chart's type
 router.put(
@@ -99,26 +102,9 @@ router.put(
 
 // Route to update a specific category's data
 router.put(
-	'/users/:id/dashboard/:dashboardId/category/:categoryName',
+	'/users/:id/dashboard/:dashboardId/category/:categoryId',
 	verifyUserOwnership,
 	updateCategoryData
-);
-
-// Route to delete data associated with a specific fileName
-router.delete(
-	'/users/:id/dashboard/:dashboardId/file/:fileName',
-	verifyUserOwnership,
-	deleteDataByFileName
-);
-
-// Route for dry-run deletion (to match existing frontend URL)
-router.delete(
-	'/users/:id/dashboard/:dashboardId/file/:fileName/dry-run',
-	verifyUserOwnership,
-	(req, res, next) => {
-		req.query.dryRun = 'true'; // Redirect to deleteDataByFileName with dryRun=true
-		deleteDataByFileName(req, res, next);
-	}
 );
 
 // CombinedChart routes
@@ -138,11 +124,11 @@ router.put(
 	updateCombinedChart
 );
 
-// Route to check monitored files
-router.get(
-	'/users/:id/dashboard/:dashboardId/check-monitored-files',
-	verifyUserOwnership,
-	checkAndUpdateMonitoredFiles
-);
+// // Route to check monitored files
+// router.get(
+// 	'/users/:id/dashboard/:dashboardId/check-monitored-files',
+// 	verifyUserOwnership,
+// 	checkAndUpdateMonitoredFiles
+// );
 
 export default router;
