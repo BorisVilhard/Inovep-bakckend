@@ -8,6 +8,7 @@ import Papa from 'papaparse';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import stream from 'stream';
 import Dashboard from '../model/Data.js';
 import {
 	setCachedDashboard,
@@ -15,6 +16,11 @@ import {
 	deleteCachedDashboard,
 } from '../utils/cache.js';
 import { mergeDashboardData } from '../utils/dashboardUtils.js';
+import {
+	transformExcelDataToJSCode,
+	extractJavascriptCode,
+	transformDataStructure,
+} from '../utils/dataTransform.js';
 
 // Logger configuration
 const logger = winston.createLogger({
@@ -79,54 +85,90 @@ function sanitizeKey(key) {
  * @param {Buffer} fileBuffer - The file buffer.
  * @param {string} fileName - The name of the file.
  * @param {string} userId - The user ID.
- * @returns {boolean} - True if valid, false if invalid.
+ * @returns {boolean} - True if valid, false if invalid with detailed logging.
  */
 function validateXlsxStructure(fileBuffer, fileName, userId) {
 	try {
 		const workbook = xlsx.read(fileBuffer, { type: 'buffer', cellDates: true });
-		if (
-			!workbook.SheetNames.length ||
-			!workbook.Sheets[workbook.SheetNames[0]]
-		) {
-			logger.error('Invalid or empty workbook', { userId, fileName });
-			return false;
-		}
-		const sheet = workbook.Sheets[workbook.SheetNames[0]];
-		const data = xlsx.utils.sheet_to_json(sheet, { raw: false, defval: null });
-		if (!data.length) {
-			logger.error('No data in sheet', { userId, fileName });
-			return false;
-		}
-		const invalidRows = [];
-		data.forEach((row, index) => {
-			const invalidValues = Object.entries(row).filter(
-				([key, val]) =>
-					val !== null &&
-					typeof val === 'string' &&
-					/[\x00-\x1F\x7F-\x9F]/.test(val)
-			);
-			if (invalidValues.length) {
-				invalidRows.push({ rowIndex: index, invalidValues });
-			}
+		logger.info('Validating workbook', {
+			userId,
+			fileName,
+			sheetCount: workbook.SheetNames.length,
 		});
-		const invalidKeys = Object.keys(data[0] || {}).filter((key) =>
-			/[\x00-\x1F\x7F-\x9F]/.test(key)
-		);
-		if (invalidRows.length || invalidKeys.length) {
-			logger.error('File contains invalid characters', {
-				userId,
-				fileName,
-				invalidRows: invalidRows.slice(0, 5),
-				invalidKeys,
-			});
+
+		if (!workbook.SheetNames.length) {
+			logger.error('No sheets found in workbook', { userId, fileName });
 			return false;
 		}
+		if (!workbook.Sheets[workbook.SheetNames[0]]) {
+			logger.error('First sheet is invalid or missing', { userId, fileName });
+			return false;
+		}
+
+		const sheet = workbook.Sheets[workbook.SheetNames[0]];
+		const data = xlsx.utils.sheet_to_json(sheet, {
+			raw: false,
+			defval: null,
+			header: 1,
+		});
+		logger.info('Extracted data from sheet', {
+			userId,
+			fileName,
+			rowCount: data.length,
+		});
+
+		if (data.length === 0) {
+			logger.warn(
+				'No data rows found in sheet, proceeding with headers if present',
+				{ userId, fileName }
+			);
+		} else {
+			const invalidRows = [];
+			data.forEach((row, index) => {
+				if (Array.isArray(row)) {
+					const invalidValues = row
+						.filter(
+							(val) =>
+								val !== null &&
+								typeof val === 'string' &&
+								/[\x00-\x1F\x7F-\x9F]/.test(val)
+						)
+						.map((val) => ({ value: val, index }));
+					if (invalidValues.length) {
+						invalidRows.push({ rowIndex: index, invalidValues });
+						logger.warn('Found invalid characters in row', {
+							userId,
+							fileName,
+							rowIndex: index,
+							invalidValues: invalidValues.slice(0, 5),
+						});
+					}
+				}
+			});
+
+			const invalidKeys = Object.keys(data[0] || {}).filter((key) =>
+				/[\x00-\x1F\x7F-\x9F]/.test(key)
+			);
+			if (invalidKeys.length) {
+				logger.warn('Found invalid characters in keys', {
+					userId,
+					fileName,
+					invalidKeys,
+				});
+			}
+		}
+
+		logger.info(
+			'XLSX structure validated successfully (with warnings if applicable)',
+			{ userId, fileName }
+		);
 		return true;
 	} catch (error) {
 		logger.error('Failed to validate XLSX structure', {
 			userId,
 			fileName,
 			error: error.message,
+			stack: error.stack,
 		});
 		return false;
 	}
@@ -142,11 +184,7 @@ function sanitizeExcelData(data) {
 		const sanitizedRow = {};
 		Object.entries(row).forEach(([key, val]) => {
 			const sanitizedKey = sanitizeKey(key);
-			if (
-				val !== null &&
-				typeof val === 'string' &&
-				/[\x00-\x1F\x7F-\x9F]/.test(val)
-			) {
+			if (val !== null && typeof val === 'string') {
 				sanitizedRow[sanitizedKey] = val.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
 			} else {
 				sanitizedRow[sanitizedKey] = val;
@@ -157,15 +195,34 @@ function sanitizeExcelData(data) {
 }
 
 /**
- * Parses an Excel file buffer into JSON data.
+ * Parses an Excel file buffer into JSON data in a streaming manner.
  * @param {Buffer} buffer - The Excel file buffer.
- * @returns {Array} - The parsed data as an array of objects.
+ * @param {Function} onData - Callback for batch processing.
+ * @returns {Promise<Array>} - Promise resolving to the parsed data.
  */
-function parseExcel(buffer) {
+async function parseExcelStream(buffer, onData) {
 	const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
 	const sheetName = workbook.SheetNames[0];
 	const sheet = workbook.Sheets[sheetName];
-	return xlsx.utils.sheet_to_json(sheet, { raw: false, defval: null });
+	const data = [];
+	const batchSize = 1000;
+	let rowIndex = 0;
+
+	const jsonData = xlsx.utils.sheet_to_json(sheet, {
+		raw: false,
+		defval: null,
+	});
+	for (let i = 0; i < jsonData.length; i += batchSize) {
+		const batch = jsonData.slice(i, i + batchSize);
+		data.push(...batch);
+		onData(batch);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		rowIndex += batch.length;
+		logger.info(`Processed ${rowIndex} rows from Excel`, {
+			fileName: sheetName,
+		});
+	}
+	return data;
 }
 
 /**
@@ -177,6 +234,10 @@ function parseCsv(buffer) {
 	return new Promise((resolve, reject) => {
 		Papa.parse(buffer.toString(), {
 			header: true,
+			chunkSize: 1000,
+			step: (results, parser) => {
+				logger.info(`Processed CSV chunk`, { rowCount: results.data.length });
+			},
 			complete: (results) => resolve(results.data),
 			error: (error) => reject(error),
 		});
@@ -184,30 +245,36 @@ function parseCsv(buffer) {
 }
 
 /**
- * Transforms data structure for dashboard storage.
- * @param {Array} data - The parsed data.
- * @param {string} fileName - The name of the file.
- * @returns {Object} - Transformed dashboard data.
+ * Limits the size of dashboardData to a maximum of 8MB.
+ * @param {Array} dashboardData - The dashboard data array.
+ * @param {number} maxSizeBytes - Maximum size in bytes (e.g., 8MB = 8 * 1024 * 1024).
+ * @returns {Array} - Truncated dashboardData within size limit.
  */
-function transformDataStructure(data, fileName) {
-	return {
-		dashboardData: {
-			categoryName: path.basename(fileName, path.extname(fileName)),
-			mainData: data.map((item, index) => ({
-				id: crypto.randomUUID(),
-				chartType: 'bar',
-				data: Object.entries(item).map(([key, value]) => ({
-					title: key,
-					value,
-					date: new Date().toISOString(),
-					fileName,
-				})),
-				isChartTypeChanged: false,
-				fileName,
-			})),
-			combinedData: [],
-		},
-	};
+function limitDashboardDataSize(dashboardData, maxSizeBytes = 8 * 1024 * 1024) {
+	let currentSize = 0;
+	const limitedData = [];
+
+	for (const category of dashboardData) {
+		const categoryJson = JSON.stringify(category);
+		const categorySize = Buffer.byteLength(categoryJson, 'utf8');
+
+		if (currentSize + categorySize <= maxSizeBytes) {
+			limitedData.push(category);
+			currentSize += categorySize;
+		} else {
+			break;
+		}
+	}
+
+	logger.info('Limited dashboard data size', {
+		originalSize: Buffer.byteLength(JSON.stringify(dashboardData), 'utf8'),
+		limitedSize: currentSize,
+		maxSizeBytes,
+		categoriesKept: limitedData.length,
+		totalCategories: dashboardData.length,
+	});
+
+	return limitedData;
 }
 
 /**
@@ -218,10 +285,9 @@ function transformDataStructure(data, fileName) {
  * @param {Object} res - The response object.
  * @returns {Promise<void>}
  */
-// ... (previous imports and helper functions remain the same)
-
 export async function createOrUpdateDashboard(req, res) {
 	const userId = req.params.userId;
+	const start = Date.now();
 	let chunkKey;
 	let cacheWarning = null;
 
@@ -253,19 +319,31 @@ export async function createOrUpdateDashboard(req, res) {
 			'text/csv',
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 			'application/vnd.ms-excel',
+			'application/octet-stream',
 		];
-		if (!allowedMimeTypes.includes(fileType)) {
-			logger.error('Invalid file type', { userId, fileName, fileType });
+		const allowedExtensions = ['.csv', '.xlsx', '.xls'];
+		const extension = fileName.toLowerCase().match(/\.[^\.]+$/)?.[0] || '';
+
+		if (
+			!allowedMimeTypes.includes(fileType) ||
+			!allowedExtensions.includes(extension)
+		) {
+			logger.error('Invalid file type', {
+				userId,
+				fileName,
+				fileType,
+				extension,
+			});
 			return res.status(400).json({
 				message: 'Only CSV and Excel (.csv, .xlsx, .xls) files are supported',
 			});
 		}
 
 		let fileBuffer;
-		const CHUNK_SIZE = 300 * 1024; // 300KB threshold
-		const MAX_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB
-		const MAX_FILE_SIZE = 6 * 1024 * 1024; // 6MB
-		chunkKey = `upload:${userId}:${dashboardId || 'new'}:${fileName}`;
+		const CHUNK_SIZE = 300 * 1024;
+		const MAX_CHUNK_SIZE = 2 * 1024 * 1024;
+		const MAX_FILE_SIZE = 6 * 1024 * 1024;
+		chunkKey = `chunk:${userId}:${dashboardId || 'new'}:${fileName}`;
 
 		if (totalChunks && chunkIndex !== undefined) {
 			const chunkIndexNum = parseInt(chunkIndex, 10);
@@ -297,20 +375,33 @@ export async function createOrUpdateDashboard(req, res) {
 					.json({ message: 'Chunk size exceeds 2MB limit' });
 			}
 
-			const chunkBase64 = file.buffer.toString('base64');
-			await redis.lpush(chunkKey, chunkBase64);
+			const chunkHash = crypto
+				.createHash('md5')
+				.update(file.buffer)
+				.digest('hex');
+			logger.info('Stored chunk', {
+				userId,
+				fileName,
+				chunkIndex: chunkIndexNum,
+				totalChunks: totalChunksNum,
+				chunkSize: file.buffer.length,
+				chunkHash,
+			});
+
+			await redis.lpush(chunkKey, file.buffer);
 
 			if (chunkIndexNum < totalChunksNum - 1) {
+				const progress = ((chunkIndexNum + 1) / totalChunksNum) * 100;
 				return res.status(200).json({
 					message: `Chunk ${chunkIndexNum + 1} of ${totalChunksNum} uploaded`,
 					chunkIndex: chunkIndexNum,
+					totalChunks: totalChunksNum,
+					progress: progress.toFixed(2),
 				});
 			}
 
 			const chunks = await redis.lrange(chunkKey, 0, -1);
-			fileBuffer = Buffer.concat(
-				chunks.map((chunk) => Buffer.from(chunk, 'base64'))
-			);
+			fileBuffer = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
 			await redis.del(chunkKey);
 
 			if (fileBuffer.length > MAX_FILE_SIZE) {
@@ -326,62 +417,347 @@ export async function createOrUpdateDashboard(req, res) {
 			fileBuffer = file.buffer;
 		}
 
-		let rawData;
+		// Stream processing for large files
+		let rawData = [];
+		const onDataBatch = (batch) => {
+			rawData.push(...batch);
+			logger.info(`Processed batch of ${batch.length} rows`, {
+				userId,
+				fileName,
+			});
+		};
+
 		if (fileName.endsWith('.csv')) {
 			rawData = await parseCsv(fileBuffer);
 		} else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
 			if (!validateXlsxStructure(fileBuffer, fileName, userId)) {
-				return res.status(400).json({ message: 'Invalid XLSX structure' });
+				return res.status(400).json({
+					message: 'Invalid XLSX structure',
+					details:
+						'Validation failed due to potential invalid characters or empty data, but file may still be processed with sanitization.',
+				});
 			}
-			rawData = sanitizeExcelData(parseExcel(fileBuffer));
+			rawData = await parseExcelStream(fileBuffer, onDataBatch);
+			rawData = sanitizeExcelData(rawData); // Ensure invalid characters are cleaned
 		} else {
 			return res.status(400).json({ message: 'Unsupported file type' });
 		}
 
-		const { dashboardData } = transformDataStructure(rawData, fileName);
+		let documentText;
+		try {
+			documentText = JSON.stringify(rawData);
+			JSON.parse(documentText);
+		} catch (jsonError) {
+			logger.error('Invalid JSON data from file', {
+				userId,
+				fileName,
+				error: jsonError.message,
+			});
+			try {
+				documentText = sanitizeJsonString(JSON.stringify(rawData));
+				JSON.parse(documentText);
+			} catch (sanitizeError) {
+				logger.error('Failed to sanitize JSON data', {
+					userId,
+					fileName,
+					error: sanitizeError.message,
+				});
+				return res.status(400).json({
+					message:
+						'File contains invalid or corrupted data. Please ensure the file has valid tabular data without special characters or macros.',
+				});
+			}
+		}
+		logger.info('Raw JSON data', {
+			userId,
+			fileName,
+			dataSnippet: documentText.substring(0, 200),
+		});
+
+		let response;
+		try {
+			response = transformExcelDataToJSCode(documentText);
+			logger.info('Transformation response', {
+				userId,
+				fileName,
+				length: response.length,
+			});
+		} catch (transformError) {
+			logger.error('Error transforming data', {
+				userId,
+				fileName,
+				error: transformError.message,
+				stack: transformError.stack,
+			});
+			return res.status(500).json({
+				message: `Data transformation failed: ${transformError.message}`,
+			});
+		}
+
+		let extractedData;
+		try {
+			extractedData = extractJavascriptCode(response);
+			logger.info('Extracted data items', {
+				userId,
+				fileName,
+				count: extractedData.length,
+				sampleExtracted: extractedData.slice(0, 3),
+			});
+		} catch (extractError) {
+			logger.error('Failed to extract JavaScript code', {
+				userId,
+				fileName,
+				error: extractError.message,
+				responseSnippet: response.substring(0, 200),
+			});
+			return res.status(400).json({
+				message:
+					'Failed to process file data. Please ensure the file contains valid data.',
+			});
+		}
+
+		const { dashboardData } = transformDataStructure(extractedData, fileName);
+		if (
+			!dashboardData ||
+			!Array.isArray(dashboardData) ||
+			dashboardData.length === 0
+		) {
+			logger.error('No valid dashboard data extracted', {
+				userId,
+				fileName,
+				extractedDataSample: extractedData.slice(0, 3),
+			});
+			return res.status(400).json({
+				message:
+					'No valid dashboard data extracted from file. Ensure the file contains tabular data with string and numeric/date columns.',
+			});
+		}
+
+		// Limit dashboardData size to 8MB
+		const maxSizeBytes = 8 * 1024 * 1024; // 8MB in bytes
+		const limitedDashboardData = limitDashboardDataSize(
+			dashboardData,
+			maxSizeBytes
+		);
+
+		const isValid = limitedDashboardData.every((category) => {
+			return (
+				typeof category.categoryName === 'string' &&
+				Array.isArray(category.mainData) &&
+				category.mainData.every(
+					(chart) =>
+						typeof chart.id === 'string' &&
+						typeof chart.chartType === 'string' &&
+						Array.isArray(chart.data) &&
+						chart.data.every(
+							(entry) =>
+								typeof entry.title === 'string' &&
+								entry.value !== undefined &&
+								typeof entry.date === 'string'
+						)
+				)
+			);
+		});
+		if (!isValid) {
+			logger.error('Invalid dashboard data structure after limiting', {
+				userId,
+				fileName,
+				dashboardDataSample: limitedDashboardData.slice(0, 3),
+			});
+			return res.status(400).json({
+				message: 'Invalid dashboard data structure after size limiting.',
+			});
+		}
+
+		const dashboardDataJson = JSON.stringify(limitedDashboardData);
+		const dashboardDataSize = Buffer.byteLength(dashboardDataJson, 'utf8');
+		if (dashboardDataSize > maxSizeBytes) {
+			logger.error('Dashboard data size still exceeds 8MB after limiting', {
+				userId,
+				fileName,
+				sizeInBytes: dashboardDataSize,
+				maxSizeBytes,
+			});
+			return res.status(400).json({
+				message: 'Failed to limit dashboard data to 8MB. Data too large.',
+			});
+		}
+		logger.info('Dashboard data size after limiting', {
+			userId,
+			fileName,
+			sizeInBytes: dashboardDataSize,
+			maxSizeBytes,
+		});
+
 		const dashboardDataFileId = new mongoose.Types.ObjectId();
 		const dashboardDataFilename = `dashboardData-${
 			dashboardId || 'new'
 		}-${Date.now()}.json`;
-		const writeStream = gfs.openUploadStreamWithId(
-			dashboardDataFileId,
-			dashboardDataFilename,
-			{
-				contentType: 'application/json',
-				metadata: { userId },
+		try {
+			const writeStream = gfs.openUploadStreamWithId(
+				dashboardDataFileId,
+				dashboardDataFilename,
+				{ contentType: 'application/json', metadata: { userId } }
+			);
+			writeStream.write(dashboardDataJson);
+			writeStream.end();
+			await new Promise((resolve, reject) => {
+				writeStream.on('finish', resolve);
+				writeStream.on('error', reject);
+			});
+			logger.info('Stored dashboardData in GridFS', {
+				userId,
+				fileName: dashboardDataFilename,
+				fileId: dashboardDataFileId,
+				sizeInBytes: dashboardDataSize,
+			});
+		} catch (gridfsError) {
+			logger.error('Failed to store dashboard data in GridFS', {
+				userId,
+				fileName: dashboardDataFilename,
+				error: gridfsError.message,
+			});
+			return res.status(500).json({
+				message: 'Failed to store dashboard data in database.',
+			});
+		}
+
+		let fileId;
+		let isChunked = false;
+		const GRIDFS_THRESHOLD = 300 * 1024;
+		if (fileBuffer.length > GRIDFS_THRESHOLD) {
+			try {
+				const writeStream = gfs.openUploadStream(fileName, {
+					contentType: fileType,
+					metadata: { userId },
+				});
+				stream.Readable.from(fileBuffer).pipe(writeStream);
+				fileId = await new Promise((resolve, reject) => {
+					writeStream.on('finish', () => resolve(writeStream.id.toString()));
+					writeStream.on('error', reject);
+				});
+				isChunked = true;
+				logger.info('Stored file in GridFS', { userId, fileName, fileId });
+			} catch (gridfsError) {
+				logger.error('Failed to store file in GridFS', {
+					userId,
+					fileName,
+					error: gridfsError.message,
+				});
+				return res.status(500).json({
+					message: 'Failed to store file in database.',
+				});
 			}
-		);
-		writeStream.write(JSON.stringify(dashboardData));
-		writeStream.end();
-		await new Promise((resolve, reject) => {
-			writeStream.on('finish', resolve);
-			writeStream.on('error', reject);
-		});
+		}
+
+		const fileData = {
+			fileId: fileId || new mongoose.Types.ObjectId().toString(),
+			filename: fileName,
+			content: isChunked ? undefined : fileBuffer,
+			source: 'local',
+			isChunked,
+			chunkCount: totalChunks ? parseInt(totalChunks, 10) : 1,
+			lastUpdate: new Date(),
+			monitoring: { status: 'active' },
+		};
 
 		const dashboardDataRef = {
 			fileId: dashboardDataFileId.toString(),
 			filename: dashboardDataFilename,
-			isChunked: !!totalChunks,
-			chunkCount: totalChunks || 1,
+			isChunked: true,
+			chunkCount: 1,
 			lastUpdate: new Date(),
 		};
 
 		let dashboard;
 		if (dashboardId) {
-			dashboard = await Dashboard.findOneAndUpdate(
-				{ _id: dashboardId, userId },
-				{ dashboardDataRef },
-				{ new: true }
-			);
-			if (!dashboard) {
-				return res.status(404).json({ message: 'Dashboard not found' });
+			if (!mongoose.Types.ObjectId.isValid(dashboardId)) {
+				logger.error('Invalid dashboard ID', { userId, dashboardId });
+				return res.status(400).json({ message: 'Invalid dashboard ID' });
 			}
-		} else {
+
+			dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+			if (!dashboard) {
+				logger.error('Dashboard not found', { userId, dashboardId });
+				return res
+					.status(404)
+					.json({ message: `Dashboard ID ${dashboardId} not found` });
+			}
+
+			const existingDashboardData = await dashboard.getDashboardData();
+			const mergedDashboardData = mergeDashboardData(
+				existingDashboardData,
+				limitedDashboardData
+			);
+			const finalDashboardData = limitDashboardDataSize(
+				mergedDashboardData,
+				maxSizeBytes
+			);
+
+			const dashboardDataJson = JSON.stringify(finalDashboardData);
+			const dashboardDataSize = Buffer.byteLength(dashboardDataJson, 'utf8');
+			if (dashboardDataSize > maxSizeBytes) {
+				logger.error('Merged dashboard data exceeds 8MB limit', {
+					userId,
+					dashboardId,
+					sizeInBytes: dashboardDataSize,
+					maxSizeBytes,
+				});
+				return res
+					.status(400)
+					.json({ message: 'Merged data exceeds 8MB limit' });
+			}
+
+			const newFileId = new mongoose.Types.ObjectId();
+			const newFilename = `dashboardData-${dashboardId}-${Date.now()}.json`;
+			try {
+				const newWriteStream = gfs.openUploadStreamWithId(
+					newFileId,
+					newFilename,
+					{ contentType: 'application/json', metadata: { userId } }
+				);
+				newWriteStream.write(dashboardDataJson);
+				newWriteStream.end();
+				await new Promise((resolve, reject) => {
+					newWriteStream.on('finish', resolve);
+					newWriteStream.on('error', reject);
+				});
+			} catch (gridfsError) {
+				logger.error('Failed to store merged dashboard data in GridFS', {
+					userId,
+					fileName: newFilename,
+					error: gridfsError.message,
+				});
+				return res.status(500).json({
+					message: 'Failed to store merged dashboard data in database.',
+				});
+			}
+
+			if (dashboard.dashboardDataRef?.fileId) {
+				await deletionQueue.add(
+					{ fileIds: [dashboard.dashboardDataRef.fileId] },
+					{ attempts: 3 }
+				);
+			}
+
+			dashboard.dashboardDataRef = {
+				fileId: newFileId.toString(),
+				filename: newFilename,
+				isChunked: true,
+				chunkCount: 1,
+				lastUpdate: new Date(),
+			};
+			dashboard.files.push(fileData);
+		} else if (dashboardName) {
 			const existingDashboard = await Dashboard.findOne({
 				dashboardName,
 				userId,
-			});
+			}).lean();
 			if (existingDashboard) {
+				logger.error('Dashboard name already exists', {
+					userId,
+					dashboardName,
+				});
 				return res
 					.status(400)
 					.json({ message: 'Dashboard name already exists' });
@@ -389,51 +765,252 @@ export async function createOrUpdateDashboard(req, res) {
 			dashboard = new Dashboard({
 				dashboardName,
 				dashboardDataRef,
-				files: [],
+				files: [fileData],
 				userId,
 			});
-			await dashboard.save();
+		} else {
+			logger.error('dashboardId or dashboardName required', { userId });
+			return res
+				.status(400)
+				.json({ message: 'dashboardId or dashboardName is required' });
 		}
 
-		const dashboardObj = {
-			...dashboard.toObject(),
-			dashboardData: await dashboard.getDashboardData(),
-		};
-		const wasCached = await setCachedDashboard(
-			userId,
-			dashboard._id,
-			dashboardObj
-		);
-		if (!wasCached) {
-			cacheWarning = 'Dashboard too large to cache; stored in database only';
+		await dashboard.save();
+		const dashboardDataToCache = dashboardId
+			? finalDashboardData
+			: limitedDashboardData; // Only cache dashboardData
+
+		try {
+			const cacheKey = `dashboard:${userId}:${dashboard._id}:data`;
+			const wasCached = await setCachedDashboard(
+				userId,
+				cacheKey,
+				dashboardDataToCache
+			);
+			if (!wasCached) {
+				cacheWarning =
+					'Dashboard data too large to cache; stored in database only';
+			} else {
+				logger.info('Cached dashboardData in Redis', {
+					userId,
+					dashboardId: dashboard._id,
+					sizeInBytes: Buffer.byteLength(
+						JSON.stringify(dashboardDataToCache),
+						'utf8'
+					),
+				});
+			}
+		} catch (cacheError) {
+			logger.warn('Failed to cache dashboardData', {
+				userId,
+				dashboardId: dashboard._id,
+				error: cacheError.message,
+			});
+			cacheWarning = 'Failed to cache dashboard data due to server issue';
 		}
+
+		try {
+			const wasMetadataCached = await Dashboard.cacheDashboardMetadata(
+				userId,
+				dashboard._id
+			);
+			if (!wasMetadataCached) {
+				logger.warn('Metadata not cached', {
+					userId,
+					dashboardId: dashboard._id,
+				});
+			}
+		} catch (metaError) {
+			logger.warn('Failed to cache dashboard metadata', {
+				userId,
+				dashboardId: dashboard._id,
+				error: metaError.message,
+			});
+		}
+
+		const duration = (Date.now() - start) / 1000;
+		logger.info('Dashboard processed successfully', {
+			userId,
+			dashboardId: dashboard._id.toString(),
+			fileName,
+			fileSize: fileBuffer.length,
+			fileType,
+			dashboardDataSize,
+			duration,
+			cacheWarning: cacheWarning || 'Dashboard data cached successfully',
+		});
 
 		res.status(201).json({
 			message: 'Dashboard processed successfully',
-			dashboard: dashboardObj,
-			rawData, // Added raw Excel data to the response
+			dashboard: {
+				_id: dashboard._id,
+				dashboardName: dashboard.dashboardName,
+				dashboardDataRef: dashboard.dashboardDataRef,
+				files: dashboard.files,
+				userId: dashboard.userId,
+				createdAt: dashboard.createdAt,
+				updatedAt: dashboard.updatedAt,
+				dashboardData: dashboardDataToCache, // Include dashboardData in response
+			},
+			duration,
 			cacheWarning,
 		});
 	} catch (error) {
 		logger.error('Error in createOrUpdateDashboard', {
 			userId,
 			fileName: req.file?.originalname,
+			fileType: req.file?.mimetype,
+			fileSize: req.file?.buffer?.length,
 			error: error.message,
+			stack: error.stack,
 		});
 		if (chunkKey) {
-			await redis
-				.del(chunkKey)
-				.catch((err) =>
-					logger.error('Failed to clean up Redis chunks', {
-						error: err.message,
-					})
-				);
+			await redis.del(chunkKey).catch((err) =>
+				logger.error('Failed to clean up Redis chunks', {
+					error: err.message,
+				})
+			);
 		}
 		res.status(500).json({ message: 'Server error', error: error.message });
 	}
 }
 
-// ... (deleteDashboardData and getDashboardData remain unchanged)
+/**
+ * PUT /users/:userId/dashboard/:dashboardId/category/:categoryName
+ * Updates category metadata (e.g., appliedChartType, checkedIds) without storing combinedData or summaryData.
+ * @param {Object} req - The request object containing userId, dashboardId, categoryName, and body with appliedChartType and checkedIds.
+ * @param {Object} res - The response object.
+ * @returns {Promise<void>}
+ */
+export async function updateCategoryData(req, res) {
+	const userId = req.params.userId;
+	const dashboardId = req.params.dashboardId;
+	const categoryName = decodeURIComponent(req.params.categoryName);
+
+	try {
+		if (
+			!mongoose.Types.ObjectId.isValid(userId) ||
+			!mongoose.Types.ObjectId.isValid(dashboardId)
+		) {
+			logger.error('Invalid userId or dashboardId', { userId, dashboardId });
+			return res.status(400).json({ message: 'Invalid userId or dashboardId' });
+		}
+
+		const dashboard = await Dashboard.findOne({ _id: dashboardId, userId });
+		if (!dashboard) {
+			logger.error('Dashboard not found', { dashboardId, userId });
+			return res.status(404).json({ message: 'Dashboard not found' });
+		}
+
+		const category = (await dashboard.getDashboardData()).find(
+			(cat) => cat.categoryName === categoryName
+		);
+		if (!category) {
+			logger.error('Category not found', { categoryName, dashboardId, userId });
+			return res.status(404).json({ message: 'Category not found' });
+		}
+
+		const { appliedChartType, checkedIds } = req.body;
+		if (appliedChartType && !validChartTypes.includes(appliedChartType)) {
+			logger.error('Invalid chart type', {
+				appliedChartType,
+				userId,
+				dashboardId,
+			});
+			return res.status(400).json({ message: 'Invalid chart type' });
+		}
+
+		category.appliedChartType = appliedChartType;
+		category.checkedIds = checkedIds || [];
+
+		const dashboardData = await dashboard.getDashboardData();
+		const dashboardDataJson = JSON.stringify(dashboardData);
+		const dashboardDataSize = Buffer.byteLength(dashboardDataJson, 'utf8');
+		const maxSizeBytes = 8 * 1024 * 1024;
+		if (dashboardDataSize > maxSizeBytes) {
+			logger.error('Dashboard data exceeds 8MB limit', {
+				userId,
+				dashboardId,
+				sizeInBytes: dashboardDataSize,
+				maxSizeBytes,
+			});
+			return res
+				.status(400)
+				.json({ message: 'Dashboard data exceeds 8MB limit' });
+		}
+
+		const dashboardDataFileId = new mongoose.Types.ObjectId();
+		const dashboardDataFilename = `dashboardData-${dashboardId}-${Date.now()}.json`;
+		const writeStream = gfs.openUploadStreamWithId(
+			dashboardDataFileId,
+			dashboardDataFilename,
+			{ contentType: 'application/json', metadata: { userId } }
+		);
+		writeStream.write(dashboardDataJson);
+		writeStream.end();
+		await new Promise((resolve, reject) => {
+			writeStream.on('finish', resolve);
+			writeStream.on('error', reject);
+		});
+
+		dashboard.dashboardDataRef = {
+			fileId: dashboardDataFileId.toString(),
+			filename: dashboardDataFilename,
+			isChunked: true,
+			chunkCount: 1,
+			lastUpdate: new Date(),
+		};
+		await dashboard.save();
+
+		const dashboardDataToCache = dashboardData; // Only cache dashboardData
+		try {
+			const cacheKey = `dashboard:${userId}:${dashboard._id}:data`;
+			const wasCached = await setCachedDashboard(
+				userId,
+				cacheKey,
+				dashboardDataToCache
+			);
+			if (!wasCached) {
+				cacheWarning =
+					'Dashboard data too large to cache; stored in database only';
+			} else {
+				logger.info('Cached dashboardData in Redis', {
+					userId,
+					dashboardId,
+					sizeInBytes: Buffer.byteLength(
+						JSON.stringify(dashboardDataToCache),
+						'utf8'
+					),
+				});
+			}
+		} catch (cacheError) {
+			logger.warn('Failed to cache dashboardData', {
+				userId,
+				dashboardId,
+				error: cacheError.message,
+			});
+			cacheWarning = 'Failed to cache dashboard data due to server issue';
+		}
+
+		logger.info('Updated category data', {
+			userId,
+			dashboardId,
+			categoryName,
+			sizeInBytes: dashboardDataSize,
+		});
+		res
+			.status(200)
+			.json({ message: 'Category data updated successfully', cacheWarning });
+	} catch (error) {
+		logger.error('Error updating category data', {
+			userId,
+			dashboardId,
+			categoryName,
+			error: error.message,
+		});
+		res.status(500).json({ message: 'Server error', error: error.message });
+	}
+}
 
 /**
  * DELETE /users/:userId/dashboard/:dashboardId
@@ -477,7 +1054,10 @@ export async function deleteDashboardData(req, res) {
 		for (let attempt = 1; attempt <= maxRetries; attempt++) {
 			try {
 				await Promise.all([
-					deleteCachedDashboard(userId, dashboardId),
+					deleteCachedDashboard(
+						userId,
+						`dashboard:${userId}:${dashboardId}:data`
+					),
 					deleteCachedDashboard(userId, `${dashboardId}:metadata`),
 				]);
 				cacheCleared = true;
@@ -535,17 +1115,36 @@ export async function getDashboardData(req, res) {
 			return res.status(400).json({ message: 'Invalid userId or dashboardId' });
 		}
 
-		const cachedDashboard = await getCachedDashboard(userId, dashboardId);
-		if (cachedDashboard) {
+		const cacheKey = `dashboard:${userId}:${dashboardId}:data`;
+		const cachedDashboardData = await getCachedDashboard(userId, cacheKey);
+		if (cachedDashboardData) {
+			const dashboard = await Dashboard.findOne(
+				{ _id: dashboardId, userId },
+				{
+					dashboardName: 1,
+					dashboardDataRef: 1,
+					files: 1,
+					userId: 1,
+					createdAt: 1,
+					updatedAt: 1,
+				}
+			);
+			if (!dashboard) {
+				logger.warn('Dashboard not found', { userId, dashboardId });
+				return res.status(404).json({ message: 'Dashboard not found' });
+			}
 			const duration = (Date.now() - start) / 1000;
-			logger.info('Retrieved dashboard data from cache', {
+			logger.info('Retrieved dashboardData from cache', {
 				userId,
 				dashboardId,
 				duration,
 			});
 			return res.status(200).json({
 				message: 'Dashboard data retrieved successfully',
-				dashboard: cachedDashboard,
+				dashboard: {
+					...dashboard.toObject(),
+					dashboardData: cachedDashboardData,
+				},
 				duration,
 			});
 		}
@@ -573,19 +1172,26 @@ export async function getDashboardData(req, res) {
 		try {
 			const wasCached = await setCachedDashboard(
 				userId,
-				dashboardId,
-				dashboardObj
+				cacheKey,
+				dashboardData
 			);
 			if (!wasCached) {
-				cacheWarning = 'Dashboard too large to cache; retrieved from database';
+				cacheWarning =
+					'Dashboard data too large to cache; retrieved from database';
+			} else {
+				logger.info('Cached dashboardData in Redis', {
+					userId,
+					dashboardId,
+					sizeInBytes: Buffer.byteLength(JSON.stringify(dashboardData), 'utf8'),
+				});
 			}
 		} catch (cacheError) {
-			logger.warn('Failed to cache dashboard', {
+			logger.warn('Failed to cache dashboardData', {
 				userId,
 				dashboardId,
 				error: cacheError.message,
 			});
-			cacheWarning = 'Failed to cache dashboard due to server issue';
+			cacheWarning = 'Failed to cache dashboard data due to server issue';
 		}
 
 		const duration = (Date.now() - start) / 1000;
