@@ -1,90 +1,153 @@
+import winston from 'winston';
+
+// Logger configuration
+const logger = winston.createLogger({
+	level: 'info',
+	format: winston.format.combine(
+		winston.format.timestamp(),
+		winston.format.json()
+	),
+	transports: [
+		new winston.transports.Console(),
+		new winston.transports.File({ filename: 'error.log', level: 'error' }),
+		new winston.transports.File({ filename: 'combined.log' }),
+	],
+});
+
 /**
- * Merges new dashboardData into existing dashboardData efficiently.
- * @param {Array} existingData - Existing dashboardData.
- * @param {Array} newData - New dashboardData to merge.
- * @returns {Array} - Merged dashboardData.
+ * Merges new dashboard data into existing data efficiently.
+ * @param {Array} ex - Existing dashboard data.
+ * @param {Array} nw - New dashboard data to merge.
+ * @returns {Array} Merged dashboard data.
  */
-export const mergeDashboardData = (existingData, newData) => {
-	// Create a map for existing categories using categoryName as the key
-	const categoryMap = new Map(
-		existingData.map((cat) => [cat.categoryName, { ...cat }])
-	);
+export const mergeDashboardData = (ex, nw) => {
+	// Validate inputs
+	if (!Array.isArray(ex) || !Array.isArray(nw)) {
+		logger.warn('Invalid input: ex and nw must be arrays', {
+			exType: typeof ex,
+			nwType: typeof nw,
+		});
+		return ex && Array.isArray(ex) ? [...ex] : [];
+	}
 
-	newData.forEach((newCategory) => {
-		const categoryName = newCategory.categoryName;
+	// Create a map for existing categories
+	const catMap = new Map();
+	ex.forEach((c, idx) => {
+		const cn = c.cat || c.categoryName; // Handle legacy data
+		if (typeof cn !== 'string' || !cn.trim()) {
+			logger.warn('Skipping invalid category', { index: idx, cat: cn });
+			return;
+		}
+		catMap.set(cn, { ...c, cat: cn });
+	});
 
-		// Check if the category already exists in the map
-		if (categoryMap.has(categoryName)) {
-			const existingCategory = categoryMap.get(categoryName);
+	nw.forEach((nc, idx) => {
+		const cn = nc.cat || nc.categoryName; // Handle legacy data
+		if (typeof cn !== 'string' || !cn.trim()) {
+			logger.warn('Skipping invalid new category', { index: idx, cat: cn });
+			return;
+		}
 
-			// Create a map for existing charts in the category using chart id as the key
-			const chartMap = new Map(
-				existingCategory.mainData.map((chart) => [chart.id, chart])
-			);
+		// Check if category exists
+		if (catMap.has(cn)) {
+			const ec = catMap.get(cn);
 
-			// Merge mainData
-			newCategory.mainData.forEach((newChart) => {
-				if (chartMap.has(newChart.id)) {
-					const existingChart = chartMap.get(newChart.id);
-					const newValue = newChart.data[0]?.value;
-
-					if (typeof newValue === 'string') {
-						existingChart.data = newChart.data;
-					} else if (newChart.isChartTypeChanged) {
-						existingChart.data = newChart.data;
-						existingChart.chartType = newChart.chartType;
-						existingChart.isChartTypeChanged = true;
-					} else {
-						existingChart.data = [...existingChart.data, ...newChart.data];
-					}
-				} else {
-					// If the chart doesn't exist, add it to the category's mainData
-					existingCategory.mainData.push(newChart);
-					chartMap.set(newChart.id, newChart); // Update the map for future lookups
+			// Validate and merge data
+			if (Array.isArray(nc.data)) {
+				const chartMap = new Map();
+				if (Array.isArray(ec.data)) {
+					ec.data.forEach((e) => {
+						if (typeof e.i === 'string') chartMap.set(e.i, e);
+					});
 				}
-			});
 
-			// Merge combinedData if it exists
-			if (newCategory.combinedData && newCategory.combinedData.length > 0) {
-				const combinedChartMap = new Map(
-					existingCategory.combinedData?.map((chart) => [chart.id, chart]) || []
-				);
+				nc.data.forEach((ne) => {
+					if (typeof ne.i !== 'string' || !Array.isArray(ne.d)) {
+						logger.debug('Skipping invalid chart', { cat: cn, chartId: ne.i });
+						return;
+					}
+					if (chartMap.has(ne.i)) {
+						const ee = chartMap.get(ne.i);
+						const nv = ne.d[0]?.v;
 
-				newCategory.combinedData.forEach((newCombinedChart) => {
-					if (combinedChartMap.has(newCombinedChart.id)) {
-						const existingCombinedChart = combinedChartMap.get(
-							newCombinedChart.id
-						);
-						existingCombinedChart.chartType = newCombinedChart.chartType;
-						existingCombinedChart.chartIds = newCombinedChart.chartIds;
-						existingCombinedChart.data = newCombinedChart.data;
-					} else {
-						// If the combined chart doesn't exist, add it
-						if (!existingCategory.combinedData) {
-							existingCategory.combinedData = [];
+						if (typeof nv === 'string') {
+							ee.d = ne.d; // Replace for string values
+						} else {
+							ee.d = [...ee.d, ...ne.d]; // Append for others
 						}
-						existingCategory.combinedData.push(newCombinedChart);
-						combinedChartMap.set(newCombinedChart.id, newCombinedChart);
+					} else {
+						// Add new chart
+						ec.data = ec.data || [];
+						ec.data.push(ne);
+						chartMap.set(ne.i, ne);
 					}
 				});
 			}
 
-			// Merge summaryData if it exists
-			if (newCategory.summaryData && newCategory.summaryData.length > 0) {
-				if (!existingCategory.summaryData) {
-					existingCategory.summaryData = [];
+			// Merge comb if exists
+			if (Array.isArray(nc.comb) && nc.comb.length > 0) {
+				const combMap = new Map();
+				if (Array.isArray(ec.comb)) {
+					ec.comb.forEach((c) => {
+						if (typeof c.i === 'string') combMap.set(c.i, c);
+					});
 				}
-				existingCategory.summaryData = [
-					...existingCategory.summaryData,
-					...newCategory.summaryData,
-				];
+
+				nc.comb.forEach((ncc) => {
+					if (typeof ncc.i !== 'string' || !Array.isArray(ncc.d)) {
+						logger.debug('Skipping invalid combined chart', {
+							cat: cn,
+							chartId: ncc.i,
+						});
+						return;
+					}
+					if (combMap.has(ncc.i)) {
+						const ecc = combMap.get(ncc.i);
+						ecc.c = ncc.c || ecc.c;
+						ecc.d = ncc.d;
+					} else {
+						ec.comb = ec.comb || [];
+						ec.comb.push(ncc);
+						combMap.set(ncc.i, ncc);
+					}
+				});
+			}
+
+			// Merge sum if exists
+			if (Array.isArray(nc.sum) && nc.sum.length > 0) {
+				ec.sum = ec.sum || [];
+				ec.sum.push(...nc.sum);
+			}
+
+			// Update chart and ids if provided
+			if (nc.chart && typeof nc.chart === 'string') ec.chart = nc.chart;
+			if (Array.isArray(nc.ids)) {
+				ec.ids = ec.ids || [];
+				ec.ids = [...new Set([...ec.ids, ...nc.ids])];
 			}
 		} else {
-			// If the category doesn't exist, add the entire new category
-			categoryMap.set(categoryName, newCategory);
+			// Add new category
+			if (Array.isArray(nc.data) && typeof cn === 'string') {
+				catMap.set(cn, {
+					cat: cn,
+					data: nc.data,
+					comb: nc.comb || [],
+					sum: nc.sum || [],
+					chart: nc.chart || 'Area',
+					ids: nc.ids || [],
+				});
+			} else {
+				logger.warn('Skipping invalid new category', { index: idx, cat: cn });
+			}
 		}
 	});
 
-	// Convert the map back to an array and return
-	return Array.from(categoryMap.values());
+	const merged = Array.from(catMap.values());
+	logger.info('Merged dashboard data', {
+		exCount: ex.length,
+		nwCount: nw.length,
+		mergedCount: merged.length,
+	});
+
+	return merged;
 };

@@ -1,4 +1,4 @@
-import { format } from 'date-fns';
+import { format, parse } from 'date-fns';
 import winston from 'winston';
 
 // Logger configuration
@@ -16,317 +16,284 @@ const logger = winston.createLogger({
 });
 
 /**
- * Transforms a JSON string (from Excel/CSV) into JavaScript code defining a 'data' array.
- * @param {string} documentText - The JSON string representing an array of objects.
- * @returns {string} - A string of valid JavaScript code defining the 'data' array.
- * @throws {Error} - If the input is not a valid JSON string or not an array.
+ * Transforms a JSON string (from Excel/CSV) into JS code defining a 'data' array.
+ * @param {string} s - JSON string of objects.
+ * @returns {string} JS code defining the array.
+ * @throws {Error} If input is invalid or not an array.
  */
-export const transformExcelDataToJSCode = (documentText) => {
-	if (typeof documentText !== 'string' || !documentText.trim()) {
-		logger.error('Invalid documentText: must be a non-empty string', {
-			documentTextSnippet: documentText?.substring(0, 200) || 'undefined',
+export const transformExcelDataToJSCode = (s) => {
+	if (typeof s !== 'string' || !s.trim()) {
+		logger.error('Invalid input: must be non-empty string', {
+			snip: s?.substring(0, 100) || 'undefined',
 		});
-		throw new Error('Invalid documentText: must be a non-empty string');
+		throw new Error('ERR_INVALID_INPUT: Input must be a non-empty string');
 	}
 
 	try {
-		const data = JSON.parse(documentText);
-		if (!Array.isArray(data)) {
-			logger.error('Parsed data is not an array', {
-				documentTextSnippet: documentText.substring(0, 200),
+		const d = JSON.parse(s);
+		if (!Array.isArray(d)) {
+			logger.error('Parsed data not an array', {
+				snip: s.substring(0, 100),
 			});
-			throw new Error('Parsed data is not an array of objects');
+			throw new Error('ERR_INVALID_DATA: Parsed data must be an array');
 		}
 
-		const code = `const data = ${JSON.stringify(data, null, 4)};`;
-		logger.info('Transformed Excel data to JavaScript code', {
-			itemCount: data.length,
-		});
+		const code = `const data = ${JSON.stringify(d, null, 2)};`; // Reduced indentation
+		logger.info('Transformed to JS code', { count: d.length });
 		return code;
-	} catch (error) {
-		logger.error('Error transforming Excel data to JavaScript code', {
-			error: error.message,
-			documentTextSnippet: documentText.substring(0, 200),
+	} catch (e) {
+		logger.error('Error transforming to JS code', {
+			error: e.message,
+			snip: s.substring(0, 100),
 		});
-		throw new Error(`Failed to transform data: ${error.message}`);
+		throw new Error(`ERR_TRANSFORM_FAILED: ${e.message}`);
 	}
 };
 
 /**
- * Extracts and parses a JavaScript array from a response string.
- * @param {string} response - The response string containing JavaScript code.
- * @returns {Array} - The parsed array of data objects.
+ * Extracts and parses a JS array from a response string.
+ * @param {string} s - Response string with JS code.
+ * @returns {Array} Parsed array of objects.
  */
-export const extractJavascriptCode = (response) => {
-	if (typeof response !== 'string' || !response.trim()) {
-		logger.error('Invalid response: must be a non-empty string', {
-			responseSnippet: response?.substring(0, 200) || 'undefined',
+export const extractJavascriptCode = (s) => {
+	if (typeof s !== 'string' || !s.trim()) {
+		logger.error('Invalid input: must be non-empty string', {
+			snip: s?.substring(0, 100) || 'undefined',
 		});
 		return [];
 	}
 
 	try {
-		const jsCodePattern = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
-		const match = response.match(jsCodePattern);
-		if (!match) {
-			logger.warn('No JavaScript array found', {
-				responseSnippet: response.substring(0, 200),
-			});
+		const p = /const\s+\w+\s*=\s*(\[[\s\S]*?\]);/;
+		const m = s.match(p);
+		if (!m) {
+			logger.warn('No JS array found', { snip: s.substring(0, 100) });
 			return [];
 		}
 
-		let jsArrayString = match[1];
-		jsArrayString = jsArrayString
-			.replace(/[\x00-\x1F\x7F-\x9F]/g, '') // Remove control characters
-			.replace(/(\w+):/g, '"$1":') // Quote unquoted keys
+		let js = m[1]
+			.replace(/[\x00-\x1F\x7F-\x9F]/g, '') // Remove control chars
+			.replace(/(\w+):/g, '"$1":') // Quote keys
 			.replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
-			.replace(/([{[,\s])'([^']*)'/g, '$1"$2"'); // Replace single quotes
+			.replace(/([{[,\s])'([^']*)'/g, '$1"$2"'); // Fix quotes
 
-		const parsedData = JSON.parse(jsArrayString);
-		if (!Array.isArray(parsedData)) {
-			logger.warn('Parsed data is not an array', {
-				responseSnippet: response.substring(0, 200),
-			});
+		const d = JSON.parse(js);
+		if (!Array.isArray(d)) {
+			logger.warn('Parsed data not an array', { snip: s.substring(0, 100) });
 			return [];
 		}
 
-		logger.info('Extracted JavaScript code', { itemCount: parsedData.length });
-		return parsedData;
-	} catch (error) {
+		logger.info('Extracted JS code', { count: d.length });
+		return d;
+	} catch (e) {
 		logger.error('Error decoding JSON', {
-			responseSnippet: response.substring(0, 200),
-			error: error.message,
+			error: e.message,
+			snip: s.substring(0, 100),
 		});
 
 		// Fallback: Recover partial objects
-		const partialData = [];
-		const objectPattern = /{[^}]*}/g;
-		const objects = response.match(objectPattern) || [];
-		for (const obj of objects) {
+		const pd = [];
+		const op = /{[^}]*}/g;
+		const objs = s.match(op) || [];
+		for (const o of objs) {
 			try {
-				const cleanedObj = obj
+				const co = o
 					.replace(/[\x00-\x1F\x7F-\x9F]/g, '')
 					.replace(/(\w+):/g, '"$1":')
 					.replace(/,\s*}/g, '}')
 					.replace(/([{[,\s])'([^']*)'/g, '$1"$2"');
-				partialData.push(JSON.parse(cleanedObj));
-			} catch (e) {
+				pd.push(JSON.parse(co));
+			} catch (er) {
 				logger.debug('Failed to parse partial object', {
-					obj: obj.substring(0, 100),
-					error: e.message,
+					obj: o.substring(0, 50),
+					error: er.message,
 				});
 			}
 		}
 
-		logger.info('Recovered partial data', { itemCount: partialData.length });
-		return partialData;
+		logger.info('Recovered partial data', { count: pd.length });
+		return pd;
 	}
 };
 
 /**
- * Transforms raw data into the DashboardCategorySchema structure.
- * @param {Array} data - Array of data objects from the uploaded file.
- * @param {string} fileName - Name of the uploaded file.
- * @returns {Object} - Object containing dashboardData array.
+ * Transforms raw data into DashboardCategorySchema structure.
+ * @param {Array} d - Array of data objects from file.
+ * @param {string} fn - File name.
+ * @returns {Object} Object with dashboardData array.
  */
-export function transformDataStructure(data, fileName) {
-	if (
-		!Array.isArray(data) ||
-		typeof fileName !== 'string' ||
-		!fileName.trim()
-	) {
-		logger.warn(
-			'Invalid input: data must be an array and fileName a non-empty string',
-			{
-				fileName: fileName || 'undefined',
-				dataType: typeof data,
-			}
-		);
+export function transformDataStructure(d, fn) {
+	if (!Array.isArray(d) || typeof fn !== 'string' || !fn.trim()) {
+		logger.warn('Invalid input: data must be array, fileName a string', {
+			fn: fn || 'undefined',
+			type: typeof d,
+		});
 		return { dashboardData: [] };
 	}
 
-	const dashboardData = [];
-	const fallbackDate = format(new Date(), 'yyyy-MM-dd');
-	const dateRegex = /^\d{4}-\d{2}(?:-\d{2})?$/;
-	const BATCH_SIZE = parseInt(process.env.BATCH_SIZE, 10) || 1000;
-
-	if (data.length === 0) {
-		logger.warn('No valid data provided', { fileName });
-		return { dashboardData };
+	if (d.length === 0) {
+		logger.warn('No data provided', { fn });
+		return { dashboardData: [] };
 	}
 
-	const isStringValue = (val) => {
-		if (typeof val !== 'string' || !val.trim()) return false;
-		if (!isNaN(parseFloat(val)) && isFinite(val)) return false;
-		if (dateRegex.test(val.trim())) return false;
+	const dd = [];
+	const fbDate = format(new Date(), 'yyyy-MM-dd');
+	const dateFormats = [
+		/^\d{4}-\d{2}-\d{2}$/, // YYYY-MM-DD
+		/^\d{2}\/\d{2}\/\d{4}$/, // MM/DD/YYYY
+		/^\d{4}-\d{2}$/, // YYYY-MM
+	];
+	const BS = parseInt(process.env.BATCH_SIZE, 10) || 1000;
+
+	const isStr = (v) => {
+		if (typeof v !== 'string' || !v.trim()) return false;
+		if (!isNaN(parseFloat(v)) && isFinite(v)) return false;
+		if (dateFormats.some((rx) => rx.test(v.trim()))) return false;
 		return true;
 	};
 
-	// Prioritize columns like 'Notes' or 'Description' for categoryName
-	const preferredColumns = ['Notes', 'Description', 'Comments'];
-	let stringColumnKey = null;
-	const keys = Object.keys(data[0] || {});
-	logger.info('Available columns', { fileName, columns: keys });
+	const prefCols = ['Notes', 'Description', 'Comments'];
+	let sck = null;
+	const ks = Object.keys(d[0] || {});
+	logger.info('Available cols', { fn, cols: ks });
 
-	if (keys.length > 0) {
-		// First, try preferred columns
-		for (const key of preferredColumns) {
-			if (
-				keys.includes(key) &&
-				data.every((item) => item[key] && isStringValue(item[key]))
-			) {
-				stringColumnKey = key;
+	if (ks.length > 0) {
+		for (const k of prefCols) {
+			if (ks.includes(k) && d.every((i) => i[k] && isStr(i[k]))) {
+				sck = k;
 				break;
 			}
 		}
-		// If no preferred column found, fall back to any string column
-		if (!stringColumnKey) {
-			for (const key of keys) {
-				if (data.every((item) => item[key] && isStringValue(item[key]))) {
-					stringColumnKey = key;
+		if (!sck) {
+			for (const k of ks) {
+				if (d.every((i) => i[k] && isStr(i[k]))) {
+					sck = k;
 					break;
 				}
 			}
 		}
 	}
-	logger.info('Selected string column key', { fileName, stringColumnKey });
+	logger.info('Selected string col', { fn, sck });
 
-	for (let i = 0; i < data.length; i += BATCH_SIZE) {
-		const batch = data.slice(i, i + BATCH_SIZE);
-		batch.forEach((item, index) => {
-			if (!item || typeof item !== 'object') {
-				logger.warn('Skipping invalid item', {
-					fileName,
-					itemIndex: i + index,
-				});
+	for (let i = 0; i < d.length; i += BS) {
+		const b = d.slice(i, i + BS);
+		b.forEach((it, idx) => {
+			if (!it || typeof it !== 'object') {
+				logger.warn('Skipping invalid item', { fn, idx: i + idx });
 				return;
 			}
 
-			const itemKeys = Object.keys(item);
-			if (itemKeys.length === 0) {
-				logger.warn('Skipping empty item', { fileName, itemIndex: i + index });
+			const iks = Object.keys(it);
+			if (iks.length === 0) {
+				logger.warn('Skipping empty item', { fn, idx: i + idx });
 				return;
 			}
 
-			let detectedDate = null;
-			for (const key of itemKeys) {
-				const val = item[key];
-				if (typeof val === 'string' && dateRegex.test(val.trim())) {
-					const trimmed = val.trim();
-					detectedDate = trimmed.length === 7 ? trimmed + '-01' : trimmed;
-					break;
+			let dt = null;
+			for (const k of iks) {
+				const v = it[k];
+				if (typeof v === 'string' && v.trim()) {
+					const t = v.trim();
+					if (dateFormats[0].test(t)) {
+						dt = t; // YYYY-MM-DD
+						break;
+					} else if (dateFormats[1].test(t)) {
+						try {
+							dt = format(parse(t, 'MM/dd/yyyy', new Date()), 'yyyy-MM-dd');
+							break;
+						} catch {}
+					} else if (dateFormats[2].test(t)) {
+						dt = `${t}-01`; // YYYY-MM
+						break;
+					}
 				}
 			}
 
-			let categoryName =
-				stringColumnKey &&
-				item[stringColumnKey] &&
-				isStringValue(item[stringColumnKey])
-					? String(item[stringColumnKey]).trim()
-					: itemKeys.length > 0
-					? String(item[itemKeys[0]] || 'Unknown').trim()
+			let cat =
+				sck && it[sck] && isStr(it[sck])
+					? String(it[sck]).trim()
+					: iks.length > 0
+					? String(it[iks[0]] || 'Unknown').trim()
 					: 'Unknown';
 
-			const charts = [];
-			for (const key of itemKeys) {
-				if (key === stringColumnKey) continue;
-				const chartTitle = String(key).trim() || 'unknown_column';
-				const value = item[key];
-				let chartValue =
-					typeof value === 'string' && !dateRegex.test(value.trim())
-						? cleanNumeric(value)
-						: value;
+			const cs = [];
+			for (const k of iks) {
+				if (k === sck) continue;
+				const ct = String(k).trim() || 'unk_col';
+				const v = it[k];
+				let cv =
+					typeof v === 'string' && !dateFormats.some((rx) => rx.test(v.trim()))
+						? cleanNumeric(v)
+						: v;
 
-				if (chartValue === undefined || chartValue === null) {
-					logger.debug('Skipping invalid chart value', { fileName, key });
+				if (cv === undefined || cv === null) {
+					logger.debug('Skipping invalid value', { fn, k, idx: i + idx });
 					continue;
 				}
 
-				const chartId = generateChartId(categoryName, chartTitle);
-				charts.push({
-					chartType: 'Area',
-					id: chartId,
-					data: [
-						{
-							title: chartTitle,
-							value: chartValue,
-							date: detectedDate || fallbackDate,
-							fileName,
-						},
-					],
-					isChartTypeChanged: false,
-					fileName,
+				const cid = generateChartId(cat, ct);
+				cs.push({
+					i: cid,
+					d: [{ t: ct, v: cv, d: new Date(dt || fbDate) }],
 				});
 			}
 
-			if (charts.length === 0) {
-				logger.warn('No valid charts generated for item', {
-					fileName,
-					itemIndex: i + index,
-				});
+			if (cs.length === 0) {
+				logger.warn('No charts generated', { fn, idx: i + idx });
 				return;
 			}
 
-			dashboardData.push({
-				categoryName,
-				mainData: charts,
-				combinedData: [],
+			dd.push({
+				cat,
+				data: cs,
+				comb: [],
+				sum: [],
+				chart: 'Area',
+				ids: [],
 			});
 		});
 	}
 
-	logger.info('Transformed data structure', {
-		fileName,
-		categoryCount: dashboardData.length,
-		sampleDashboardData: dashboardData.slice(0, 3),
+	logger.info('Transformed data', {
+		fn,
+		count: dd.length,
+		sample: dd.slice(0, 2), // Reduced sample size
 	});
 
-	return { dashboardData };
+	return { dashboardData: dd };
 }
 
 /**
- * Cleans string values into numeric format if possible.
- * @param {any} value - The value to clean.
- * @returns {number|string|any} - The cleaned numeric value or original value.
+ * Cleans string values to numeric format if possible.
+ * @param {any} v - Value to clean.
+ * @returns {number|string|any} Cleaned value.
  */
-export function cleanNumeric(value) {
-	if (typeof value !== 'string' || !value.trim()) return value;
+export function cleanNumeric(v) {
+	if (typeof v !== 'string' || !v.trim()) return v;
 
-	const numMatch = value.match(/-?\d+(\.\d+)?/);
-	if (numMatch) {
-		const numStr = numMatch[0];
-		return numStr.includes('.') ? parseFloat(numStr) : parseInt(numStr, 10);
+	const m = v.match(/-?\d+(\.\d+)?/);
+	if (m) {
+		const s = m[0];
+		return s.includes('.') ? parseFloat(s) : parseInt(s, 10);
 	}
 
-	return value;
+	return v;
 }
 
 /**
- * Generates a unique chart ID based on category name and chart title.
- * @param {string} categoryName - The category name.
- * @param {string} chartTitle - The chart title.
- * @returns {string} - The generated chart ID.
+ * Generates a unique chart ID from category and title.
+ * @param {string} c - Category name.
+ * @param {string} t - Chart title.
+ * @returns {string} Chart ID.
  */
-export function generateChartId(categoryName, chartTitle) {
-	const safeCategoryName =
-		typeof categoryName === 'string'
-			? categoryName.trim()
-			: String(categoryName || 'unknown');
-	const safeChartTitle =
-		typeof chartTitle === 'string'
-			? chartTitle.trim()
-			: String(chartTitle || 'unknown');
+export function generateChartId(c, t) {
+	const sc = typeof c === 'string' ? c.trim() : String(c || 'unk');
+	const st = typeof t === 'string' ? t.trim() : String(t || 'unk');
 
-	const id = `${safeCategoryName
+	const id = `${sc.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${st
 		.toLowerCase()
-		.replace(/\s+/g, '-')}-${safeChartTitle
-		.toLowerCase()
-		.replace(/\s+/g, '-')}`;
+		.replace(/[^a-z0-9]+/g, '-')}`.replace(/^-|-$/g, '');
 
-	logger.debug('Generated chart ID', {
-		categoryName: safeCategoryName,
-		chartTitle: safeChartTitle,
-		id,
-	});
+	logger.debug('Generated ID', { cat: sc, title: st, id });
 	return id;
 }

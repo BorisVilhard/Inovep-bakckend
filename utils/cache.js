@@ -1,7 +1,7 @@
 import { Redis } from '@upstash/redis';
+import zlib from 'zlib';
 import winston from 'winston';
 
-// Logger configuration for cache operations
 const logger = winston.createLogger({
 	level: 'info',
 	format: winston.format.combine(
@@ -10,134 +10,105 @@ const logger = winston.createLogger({
 	),
 	transports: [
 		new winston.transports.Console(),
-		new winston.transports.File({
-			filename: 'cache-error.log',
-			level: 'error',
-		}),
-		new winston.transports.File({ filename: 'cache-combined.log' }),
+		new winston.transports.File({ filename: 'error.log', level: 'error' }),
+		new winston.transports.File({ filename: 'combined.log' }),
 	],
 });
 
-// Initialize Redis client with Upstash configuration
-const redis = new Redis({
-	url: process.env.UPSTASH_REDIS_REST_URL,
-	token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
+const redis = Redis.fromEnv();
+const MAX_CACHE_SIZE = 5 * 1024 * 1024; // 5MB threshold
 
-// Verify Redis configuration
-if (
-	!process.env.UPSTASH_REDIS_REST_URL ||
-	!process.env.UPSTASH_REDIS_REST_TOKEN
-) {
-	logger.error(
-		'Missing Upstash Redis configuration. Ensure UPSTASH_REDIS_URL and UPSTASH_REDIS_TOKEN are set in the environment variables.'
-	);
-	throw new Error(
-		'Upstash Redis configuration is incomplete. Please check environment variables.'
-	);
+/**
+ * Sets compressed dashboard data in Redis.
+ * @param {string} uid - User ID.
+ * @param {string} k - Cache key.
+ * @param {Array} d - Dashboard data.
+ * @returns {Promise<boolean>} True if cached, false if too large.
+ */
+export async function setCachedDashboard(uid, k, d) {
+	try {
+		const json = JSON.stringify(d);
+		const size = Buffer.byteLength(json, 'utf8');
+		if (size > MAX_CACHE_SIZE) {
+			logger.info('Data too large to cache', {
+				uid,
+				key: k,
+				size,
+				max: MAX_CACHE_SIZE,
+			});
+			return false;
+		}
+
+		const compressed = zlib.gzipSync(json);
+		const compSize = compressed.length;
+		logger.info('Compressed data for cache', {
+			uid,
+			key: k,
+			origSize: size,
+			compSize,
+		});
+
+		const cacheData = {
+			compressed: true,
+			origSize: size,
+			data: compressed.toString('base64'),
+		};
+
+		await redis.set(k, JSON.stringify(cacheData));
+		return true;
+	} catch (e) {
+		logger.error('Error caching data', { uid, key: k, error: e.message });
+		return false;
+	}
 }
 
-logger.info('Upstash Redis client initialized successfully.', {
-	url: process.env.UPSTASH_REDIS_REST_URL,
-});
-
 /**
- * Retrieves a cached dashboard from Upstash Redis.
- * @param {string} userId - The user ID.
- * @param {string} dashboardId - The dashboard ID.
- * @returns {Promise<Object|null>} - The cached dashboard object or null if not found.
+ * Gets dashboard data from Redis, decompressing if needed.
+ * @param {string} uid - User ID.
+ * @param {string} k - Cache key.
+ * @returns {Promise<Array|null>} Decompressed data or null if not found.
  */
-export const getCachedDashboard = async (userId, dashboardId) => {
-	const cacheKey = `dashboard:${userId}:${dashboardId}`;
+export async function getCachedDashboard(uid, k) {
 	try {
-		const cached = await redis.get(cacheKey);
-		if (cached) {
-			logger.info('Upstash Redis cache hit', { cacheKey });
-			return typeof cached === 'string' ? JSON.parse(cached) : cached;
+		const cd = await redis.get(k);
+		if (!cd) {
+			logger.info('Cache miss', { uid, key: k });
+			return null;
 		}
-		logger.info('Upstash Redis cache miss', { cacheKey });
+
+		const cacheObj = JSON.parse(cd);
+		if (!cacheObj.compressed) {
+			logger.info('Retrieved uncompressed cache', { uid, key: k });
+			return cacheObj;
+		}
+
+		const compressed = Buffer.from(cacheObj.data, 'base64');
+		const decompressed = zlib.gunzipSync(compressed).toString('utf8');
+		const d = JSON.parse(decompressed);
+		logger.info('Retrieved compressed cache', {
+			uid,
+			key: k,
+			origSize: cacheObj.origSize,
+			compSize: compressed.length,
+		});
+		return d;
+	} catch (e) {
+		logger.error('Error retrieving cache', { uid, key: k, error: e.message });
 		return null;
-	} catch (error) {
-		logger.error('Error retrieving from Upstash Redis', {
-			cacheKey,
-			error: error.message,
-		});
-		return null; // Fallback to database
 	}
-};
+}
 
 /**
- * Caches a dashboard in Upstash Redis with a 1-hour TTL, if within size limit.
- * @param {string} userId - The user ID.
- * @param {string} dashboardId - The dashboard ID.
- * @param {Object} data - The dashboard or metadata to cache.
- * @returns {Promise<boolean>} - True if cached, false if skipped due to size.
- */
-export const setCachedDashboard = async (userId, dashboardId, data) => {
-	const dataJson = JSON.stringify(data);
-	const sizeInBytes = Buffer.byteLength(dataJson, 'utf8');
-	const MAX_CACHE_SIZE = 5 * 1024 * 1024; // 5MB threshold
-	const WARN_THRESHOLD = 4 * 1024 * 1024; // 4MB warning threshold
-
-	if (sizeInBytes > WARN_THRESHOLD) {
-		logger.warn('Approaching Redis size limit', {
-			userId,
-			dashboardId,
-			sizeInBytes,
-			maxSize: MAX_CACHE_SIZE,
-		});
-	} else if (sizeInBytes < 500 * 1024) {
-		logger.info('Caching small object', {
-			userId,
-			dashboardId,
-			sizeInBytes,
-		});
-	}
-
-	if (sizeInBytes > MAX_CACHE_SIZE) {
-		logger.info('Data too large to cache', {
-			userId,
-			dashboardId,
-			sizeInBytes,
-			maxSize: MAX_CACHE_SIZE,
-		});
-		return false; // Skip caching
-	}
-
-	const cacheKey = `dashboard:${userId}:${dashboardId}`;
-	try {
-		await redis.set(cacheKey, dataJson, { ex: 3600 }); // 1-hour TTL
-		logger.info('Data cached in Upstash Redis', {
-			cacheKey,
-			sizeInBytes,
-		});
-		return true;
-	} catch (error) {
-		logger.error('Error caching in Upstash Redis', {
-			cacheKey,
-			sizeInBytes,
-			error: error.message,
-		});
-		throw error; // Rethrow for caller to handle
-	}
-};
-
-/**
- * Deletes a cached dashboard from Upstash Redis.
- * @param {string} userId - The user ID.
- * @param {string} dashboardId - The dashboard ID.
+ * Deletes dashboard data from Redis.
+ * @param {string} uid - User ID.
+ * @param {string} k - Cache key.
  * @returns {Promise<void>}
  */
-export const deleteCachedDashboard = async (userId, dashboardId) => {
-	const cacheKey = `dashboard:${userId}:${dashboardId}`;
+export async function deleteCachedDashboard(uid, k) {
 	try {
-		await redis.del(cacheKey);
-		logger.info('Dashboard cache deleted', { cacheKey });
-	} catch (error) {
-		logger.error('Error deleting from Upstash Redis', {
-			cacheKey,
-			error: error.message,
-		});
-		throw error;
+		await redis.del(k);
+		logger.info('Deleted cache', { uid, key: k });
+	} catch (e) {
+		logger.error('Error deleting cache', { uid, key: k, error: e.message });
 	}
-};
+}

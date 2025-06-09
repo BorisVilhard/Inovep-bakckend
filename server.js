@@ -112,11 +112,12 @@ app.use('/register', registerRoutes);
 app.use('/refresh', refreshRoutes);
 app.use('/logout', logoutRoutes);
 app.use('/chat', chatRoute);
+app.use('/dataProcess', dataProcessingRoutes);
+
 app.use('/api/monitor', monitorRoutes);
 
 // Routes (mixed access)
 app.use('/users', userRoutes); // May have public and protected endpoints
-app.use('/dataProcess', dataProcessingRoutes); // Public for upload, protected for delete/get
 
 // Protected routes
 app.use(verifyJWT);

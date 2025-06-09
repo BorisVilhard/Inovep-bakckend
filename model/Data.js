@@ -2,9 +2,10 @@ import mongoose from 'mongoose';
 import { GridFSBucket } from 'mongodb';
 import Queue from 'bull';
 import winston from 'winston';
+import zlib from 'zlib';
 import {
-	getCachedDashboard,
 	setCachedDashboard,
+	getCachedDashboard,
 	deleteCachedDashboard,
 } from '../utils/cache.js';
 
@@ -33,28 +34,12 @@ const deletionQueue = new Queue('gridfs-deletion', {
 	redis: { url: REDIS_URL, password: REDIS_TOKEN },
 });
 
-// Valid chart types
-const validChartTypes = [
-	'EntryArea',
-	'IndexArea',
-	'EntryLine',
-	'IndexLine',
-	'TradingLine',
-	'IndexBar',
-	'Bar',
-	'Pie',
-	'Line',
-	'Radar',
-	'Area',
-];
-
 // Schema for individual entries
 const EntrySchema = new mongoose.Schema(
 	{
-		title: { type: String, required: true, trim: true, maxlength: 100 },
-		value: { type: mongoose.Schema.Types.Mixed, required: true },
-		date: { type: Date, required: true },
-		fileName: { type: String, required: true, trim: true, maxlength: 255 },
+		t: { type: String, required: true, trim: true, maxlength: 100 }, // title
+		v: { type: mongoose.Schema.Types.Mixed, required: true }, // value
+		d: { type: Date, required: true }, // date
 	},
 	{ _id: false }
 );
@@ -62,15 +47,12 @@ const EntrySchema = new mongoose.Schema(
 // Schema for indexed entries
 const IndexedEntriesSchema = new mongoose.Schema(
 	{
-		id: { type: String, required: true, trim: true, maxlength: 100 },
-		chartType: { type: String, required: true, enum: validChartTypes },
-		data: {
+		i: { type: String, required: true, trim: true, maxlength: 100 }, // id
+		d: {
 			type: [EntrySchema],
 			required: true,
 			validate: [(arr) => arr.length > 0, 'Data array cannot be empty'],
-		},
-		isChartTypeChanged: { type: Boolean, default: false },
-		fileName: { type: String, required: true, trim: true, maxlength: 255 },
+		}, // data
 	},
 	{ _id: false }
 );
@@ -78,27 +60,23 @@ const IndexedEntriesSchema = new mongoose.Schema(
 // Schema for combined charts
 const CombinedChartSchema = new mongoose.Schema(
 	{
-		id: {
+		i: {
 			type: String,
 			required: true,
 			unique: true,
 			trim: true,
 			maxlength: 100,
-		},
-		chartType: { type: String, required: true, enum: validChartTypes },
-		chartIds: {
+		}, // id
+		c: {
 			type: [String],
 			required: true,
-			validate: [
-				(arr) => arr.length >= 2,
-				'At least two chartIds are required',
-			],
-		},
-		data: {
+			validate: [(arr) => arr.length >= 2, 'At least two chartIds required'],
+		}, // chartIds
+		d: {
 			type: [EntrySchema],
 			required: true,
 			validate: [(arr) => arr.length > 0, 'Data array cannot be empty'],
-		},
+		}, // data
 	},
 	{ _id: false }
 );
@@ -106,16 +84,16 @@ const CombinedChartSchema = new mongoose.Schema(
 // Schema for dashboard categories
 const DashboardCategorySchema = new mongoose.Schema(
 	{
-		categoryName: { type: String, required: true, trim: true, maxlength: 100 },
-		mainData: {
+		cat: { type: String, required: true, trim: true, maxlength: 100 }, // categoryName
+		data: {
 			type: [IndexedEntriesSchema],
 			required: true,
-			validate: [(arr) => arr.length > 0, 'MainData array cannot be empty'],
-		},
-		combinedData: { type: [CombinedChartSchema], default: [] },
-		summaryData: { type: [EntrySchema], default: [] },
-		appliedChartType: { type: String, enum: validChartTypes },
-		checkedIds: { type: [String], default: [] },
+			validate: [(arr) => arr.length > 0, 'Data array cannot be empty'],
+		}, // mainData
+		comb: { type: [CombinedChartSchema], default: [] }, // combinedData
+		sum: { type: [EntrySchema], default: [] }, // summaryData
+		chart: { type: String }, // appliedChartType
+		ids: { type: [String], default: [] }, // checkedIds
 	},
 	{ _id: false }
 );
@@ -123,17 +101,17 @@ const DashboardCategorySchema = new mongoose.Schema(
 // Schema for file data
 const FileDataSchema = new mongoose.Schema(
 	{
-		fileId: { type: String, trim: true },
-		filename: { type: String, required: true, trim: true, maxlength: 255 },
-		content: { type: Buffer, required: false },
-		lastUpdate: { type: Date, default: Date.now },
-		source: { type: String, enum: ['local', 'google'], default: 'local' },
-		isChunked: { type: Boolean, default: false },
-		chunkCount: { type: Number, default: 1, min: 1 },
-		monitoring: {
-			status: { type: String, enum: ['active', 'expired'], default: 'active' },
-			expireDate: { type: Date },
-			folderId: { type: String, default: null, trim: true, maxlength: 100 },
+		fid: { type: String, trim: true }, // fileId
+		fn: { type: String, required: true, trim: true, maxlength: 255 }, // filename
+		c: { type: Buffer }, // content
+		lu: { type: Date, default: Date.now }, // lastUpdate
+		src: { type: String, enum: ['local', 'google'], default: 'local' }, // source
+		ch: { type: Boolean, default: false }, // isChunked
+		cc: { type: Number, default: 1, min: 1 }, // chunkCount
+		mon: {
+			s: { type: String, enum: ['active', 'expired'], default: 'active' }, // status
+			ed: { type: Date }, // expireDate
+			f: { type: String, default: null, trim: true, maxlength: 100 }, // folderId
 		},
 	},
 	{ _id: true }
@@ -142,11 +120,11 @@ const FileDataSchema = new mongoose.Schema(
 // Schema for dashboard data reference
 const DashboardDataRefSchema = new mongoose.Schema(
 	{
-		fileId: { type: String, required: true, trim: true },
-		filename: { type: String, required: true, trim: true, maxlength: 255 },
-		isChunked: { type: Boolean, default: true },
-		chunkCount: { type: Number, default: 1, min: 1 },
-		lastUpdate: { type: Date, default: Date.now },
+		fid: { type: String, required: true, trim: true }, // fileId
+		fn: { type: String, required: true, trim: true, maxlength: 255 }, // filename
+		ch: { type: Boolean, default: true }, // isChunked
+		cc: { type: Number, default: 1, min: 1 }, // chunkCount
+		lu: { type: Date, default: Date.now }, // lastUpdate
 	},
 	{ _id: false }
 );
@@ -154,50 +132,44 @@ const DashboardDataRefSchema = new mongoose.Schema(
 // Dashboard Schema
 const DashboardSchema = new mongoose.Schema(
 	{
-		dashboardName: {
+		name: {
 			type: String,
 			required: true,
 			trim: true,
 			maxlength: 100,
 			index: true,
-		},
-		dashboardDataRef: { type: DashboardDataRefSchema, default: null },
-		files: [FileDataSchema],
-		userId: {
+		}, // dashboardName
+		ref: { type: DashboardDataRefSchema, default: null }, // dashboardDataRef
+		f: [FileDataSchema], // files
+		uid: {
 			type: mongoose.Schema.Types.ObjectId,
 			ref: 'User',
 			required: true,
 			index: true,
-		},
-		createdAt: {
-			type: Date,
-			default: Date.now,
-		},
-		updatedAt: {
-			type: Date,
-			default: Date.now,
-		},
-		deletedAt: { type: Date, default: null },
+		}, // userId
+		ca: { type: Date, default: Date.now }, // createdAt
+		ua: { type: Date, default: Date.now }, // updatedAt
+		da: { type: Date, default: null }, // deletedAt
 	},
 	{
-		timestamps: true,
+		timestamps: { createdAt: 'ca', updatedAt: 'ua' },
 		versionKey: false,
 	}
 );
 
 // Indexes
-DashboardSchema.index({ userId: 1, _id: 1 });
-DashboardSchema.index({ userId: 1, dashboardName: 1 });
-DashboardSchema.index({ 'files.filename': 1 });
-DashboardSchema.index({ 'dashboardDataRef.filename': 1 });
+DashboardSchema.index({ uid: 1, _id: 1 });
+DashboardSchema.index({ uid: 1, name: 1 });
+DashboardSchema.index({ 'f.fn': 1 });
+DashboardSchema.index({ 'ref.fn': 1 });
 DashboardSchema.index(
-	{ 'files.monitoring.status': 1, 'files.monitoring.expireDate': 1 },
-	{ partialFilterExpression: { 'files.monitoring.status': 'expired' } }
+	{ 'f.mon.s': 1, 'f.mon.ed': 1 },
+	{ partialFilterExpression: { 'f.mon.s': 'expired' } }
 );
 
 // Pre-save middleware
 DashboardSchema.pre('save', function (next) {
-	this.updatedAt = new Date();
+	this.ua = new Date();
 	next();
 });
 
@@ -208,37 +180,35 @@ DashboardSchema.pre('remove', async function (next) {
 			bucketName: 'Uploads',
 		});
 		const fileIds = [];
-		if (this.dashboardDataRef?.fileId && this.dashboardDataRef?.isChunked) {
-			fileIds.push(new mongoose.Types.ObjectId(this.dashboardDataRef.fileId));
+		if (this.ref?.fid && this.ref?.ch) {
+			fileIds.push(new mongoose.Types.ObjectId(this.ref.fid));
 		}
-		this.files
-			.filter((file) => file.fileId && file.isChunked)
-			.forEach((file) =>
-				fileIds.push(new mongoose.Types.ObjectId(file.fileId))
-			);
+		this.f
+			.filter((file) => file.fid && file.ch)
+			.forEach((file) => fileIds.push(new mongoose.Types.ObjectId(file.fid)));
 
 		if (fileIds.length > 0) {
 			await deletionQueue.add({ fileIds }, { attempts: 3 });
 			logger.info('Queued GridFS deletions for dashboard removal', {
-				dashboardId: this._id,
+				dashboardId: this._id.toString(),
 				fileCount: fileIds.length,
 			});
 		}
 		next();
 	} catch (err) {
 		logger.error('Error in pre-remove middleware', {
-			dashboardId: this._id,
+			dashboardId: this._id.toString(),
 			error: err.message,
 		});
 		next(err);
 	}
 });
 
-// Retrieve dashboard data from GridFS
+// Retrieve dashboard data from GridFS, decompressing if needed
 DashboardSchema.methods.getDashboardData = async function () {
-	if (!this.dashboardDataRef?.fileId || !this.dashboardDataRef?.isChunked) {
+	if (!this.ref?.fid || !this.ref?.ch) {
 		logger.warn('No dashboard data reference found', {
-			dashboardId: this._id,
+			dashboardId: this._id.toString(),
 		});
 		return [];
 	}
@@ -247,53 +217,71 @@ DashboardSchema.methods.getDashboardData = async function () {
 	});
 	try {
 		const downloadStream = gfs.openDownloadStream(
-			new mongoose.Types.ObjectId(this.dashboardDataRef.fileId)
+			new mongoose.Types.ObjectId(this.ref.fid)
 		);
-		let data = '';
+		let chunks = [];
 		for await (const chunk of downloadStream) {
-			data += chunk.toString('utf8');
+			chunks.push(chunk);
 		}
-		return JSON.parse(data);
+		const data = Buffer.concat(chunks);
+
+		let json;
+		if (data.length < 100 && data.toString('utf8').startsWith('{')) {
+			json = data.toString('utf8'); // Uncompressed (small files)
+		} else {
+			try {
+				json = zlib.gunzipSync(data).toString('utf8'); // Compressed
+			} catch (e) {
+				logger.warn('Data not compressed, trying raw', {
+					dashboardId: this._id.toString(),
+				});
+				json = data.toString('utf8');
+			}
+		}
+
+		const parsed = JSON.parse(json);
+		if (!Array.isArray(parsed)) {
+			logger.error('Invalid dashboard data format', {
+				dashboardId: this._id.toString(),
+			});
+			return [];
+		}
+		return parsed;
 	} catch (err) {
 		logger.error('Error retrieving dashboard data from GridFS', {
-			dashboardId: this._id,
-			fileId: this.dashboardDataRef.fileId,
+			dashboardId: this._id.toString(),
+			fileId: this.ref.fid,
 			error: err.message,
 		});
-		return []; // Return empty array instead of throwing
+		return [];
 	}
 };
 
 // Cache dashboard metadata
-DashboardSchema.statics.cacheDashboardMetadata = async function (
-	userId,
-	dashboardId
-) {
+DashboardSchema.statics.cacheDashboardMetadata = async function (uid, id) {
+	if (
+		!mongoose.Types.ObjectId.isValid(uid) ||
+		!mongoose.Types.ObjectId.isValid(id)
+	) {
+		logger.error('Invalid uid or id', { uid, id });
+		return false;
+	}
 	try {
-		const dashboard = await this.findById(dashboardId, {
-			'dashboardDataRef.filename': 1,
-			'dashboardDataRef.fileId': 1,
-			files: 1,
+		const dashboard = await this.findById(id, {
+			'ref.fn': 1,
+			'ref.fid': 1,
+			f: 1,
 		}).lean();
 
 		if (!dashboard) {
-			logger.warn('Dashboard not found for metadata caching', {
-				dashboardId,
-				userId,
-			});
+			logger.warn('Dashboard not found for metadata caching', { id, uid });
 			return false;
 		}
 
-		const fileNames = new Set(
-			[dashboard.dashboardDataRef?.filename].filter(Boolean)
-		);
-		const fileIds = new Set(
-			[dashboard.dashboardDataRef?.fileId].filter(Boolean)
-		);
-		dashboard.files?.forEach((file) => {
-			if (file.fileId && file.isChunked) {
-				fileIds.add(file.fileId);
-			}
+		const fileNames = new Set([dashboard.ref?.fn].filter(Boolean));
+		const fileIds = new Set([dashboard.ref?.fid].filter(Boolean));
+		dashboard.f?.forEach((file) => {
+			if (file.fid && file.ch) fileIds.add(file.fid);
 		});
 
 		const metadata = {
@@ -301,45 +289,40 @@ DashboardSchema.statics.cacheDashboardMetadata = async function (
 			fileIds: [...fileIds],
 		};
 
-		// Check metadata size before caching
 		const metadataJson = JSON.stringify(metadata);
 		const sizeInBytes = Buffer.byteLength(metadataJson, 'utf8');
-		const MAX_CACHE_SIZE = 5 * 1024 * 1024; // 5MB threshold
+		const MAX_CACHE_SIZE = 5 * 1024 * 1024;
 		if (sizeInBytes > MAX_CACHE_SIZE) {
 			logger.info('Metadata too large to cache', {
-				userId,
-				dashboardId,
+				uid,
+				id,
 				sizeInBytes,
 				maxSize: MAX_CACHE_SIZE,
 			});
 			return false;
 		}
 
-		const wasCached = await setCachedDashboard(
-			userId,
-			`${dashboardId}:metadata`,
-			metadata
-		);
+		const wasCached = await setCachedDashboard(uid, `${id}:meta`, metadata);
 		if (!wasCached) {
 			logger.info('Metadata too large to cache via setCachedDashboard', {
-				userId,
-				dashboardId,
+				uid,
+				id,
 				sizeInBytes,
 			});
 			return false;
 		}
 
 		logger.info('Cached dashboard metadata', {
-			userId,
-			dashboardId,
+			uid,
+			id,
 			fileCount: fileIds.size,
 			sizeInBytes,
 		});
 		return true;
 	} catch (err) {
 		logger.error('Error caching dashboard metadata', {
-			userId,
-			dashboardId,
+			uid,
+			id,
 			error: err.message,
 		});
 		return false;
@@ -347,25 +330,26 @@ DashboardSchema.statics.cacheDashboardMetadata = async function (
 };
 
 // Get cached metadata
-DashboardSchema.statics.getCachedMetadata = async function (
-	userId,
-	dashboardId
-) {
+DashboardSchema.statics.getCachedMetadata = async function (uid, id) {
+	if (
+		!mongoose.Types.ObjectId.isValid(uid) ||
+		!mongoose.Types.ObjectId.isValid(id)
+	) {
+		logger.error('Invalid uid or id', { uid, id });
+		return null;
+	}
 	try {
-		const metadata = await getCachedDashboard(
-			userId,
-			`${dashboardId}:metadata`
-		);
+		const metadata = await getCachedDashboard(uid, `${id}:meta`);
 		if (metadata) {
-			logger.info('Redis cache hit for metadata', { userId, dashboardId });
+			logger.info('Redis cache hit for metadata', { uid, id });
 		} else {
-			logger.info('Redis cache miss for metadata', { userId, dashboardId });
+			logger.info('Redis cache miss for metadata', { uid, id });
 		}
 		return metadata;
 	} catch (err) {
 		logger.error('Error retrieving cached metadata', {
-			userId,
-			dashboardId,
+			uid,
+			id,
 			error: err.message,
 		});
 		return null;
@@ -379,15 +363,16 @@ deletionQueue.process(async (job) => {
 		bucketName: 'Uploads',
 	});
 
-	const BATCH_SIZE = 500;
 	try {
 		const fileObjectIds = fileIds.map((id) => new mongoose.Types.ObjectId(id));
-		await mongoose.connection.db.collection('fs.files').deleteMany({
-			_id: { $in: fileObjectIds },
-		});
-		await mongoose.connection.db.collection('fs.chunks').deleteMany({
-			files_id: { $in: fileObjectIds },
-		});
+		await Promise.all([
+			mongoose.connection.db.collection('fs.files').deleteMany({
+				_id: { $in: fileObjectIds },
+			}),
+			mongoose.connection.db.collection('fs.chunks').deleteMany({
+				files_id: { $in: fileObjectIds },
+			}),
+		]);
 		logger.info('Completed GridFS deletion job', {
 			jobId: job.id,
 			fileCount: fileIds.length,
@@ -402,50 +387,38 @@ deletionQueue.process(async (job) => {
 });
 
 // Optimized deleteDashboardData
-DashboardSchema.statics.deleteDashboardData = async function (
-	dashboardId,
-	userId
-) {
+DashboardSchema.statics.deleteDashboardData = async function (id, uid) {
 	const start = Date.now();
 	try {
 		if (
-			!mongoose.Types.ObjectId.isValid(dashboardId) ||
-			!mongoose.Types.ObjectId.isValid(userId)
+			!mongoose.Types.ObjectId.isValid(id) ||
+			!mongoose.Types.ObjectId.isValid(uid)
 		) {
-			logger.error('Invalid dashboardId or userId', { dashboardId, userId });
-			throw new Error('Invalid dashboardId or userId');
+			logger.error('Invalid id or uid', { id, uid });
+			throw new Error('ERR_INVALID_ID: Invalid id or uid');
 		}
 
 		const dashboard = await this.findOne(
-			{ _id: dashboardId, userId },
-			{
-				'dashboardDataRef.fileId': 1,
-				'dashboardDataRef.isChunked': 1,
-				files: 1,
-			}
+			{ _id: id, uid },
+			{ 'ref.fid': 1, 'ref.ch': 1, f: 1 }
 		).lean();
 
 		if (!dashboard) {
-			logger.error('Dashboard not found', { dashboardId, userId });
-			throw new Error('Dashboard not found');
+			logger.error('Dashboard not found', { id, uid });
+			throw new Error('ERR_NOT_FOUND: Dashboard not found');
 		}
 
 		const fileIds = [];
-		if (
-			dashboard.dashboardDataRef?.fileId &&
-			dashboard.dashboardDataRef?.isChunked
-		) {
-			fileIds.push(dashboard.dashboardDataRef.fileId);
+		if (dashboard.ref?.fid && dashboard.ref?.ch) {
+			fileIds.push(dashboard.ref.fid);
 		}
-		dashboard.files?.forEach((file) => {
-			if (file.fileId && file.isChunked) {
-				fileIds.push(file.fileId);
-			}
+		dashboard.f?.forEach((file) => {
+			if (file.fid && file.ch) fileIds.push(file.fid);
 		});
 
 		const result = await this.updateOne(
-			{ _id: dashboardId, userId },
-			{ $set: { dashboardDataRef: null, files: [] } },
+			{ _id: id, uid },
+			{ $set: { ref: null, f: [] } },
 			{ writeConcern: { w: 0 } }
 		);
 
@@ -457,21 +430,21 @@ DashboardSchema.statics.deleteDashboardData = async function (
 			);
 			queuedFiles = fileIds.length;
 			logger.info('Queued GridFS deletions', {
-				dashboardId,
-				userId,
+				id,
+				uid,
 				fileCount: queuedFiles,
 			});
 		}
 
 		await Promise.all([
-			deleteCachedDashboard(userId, dashboardId),
-			deleteCachedDashboard(userId, `${dashboardId}:metadata`),
+			deleteCachedDashboard(uid, id),
+			deleteCachedDashboard(uid, `${id}:meta`),
 		]);
 
 		const duration = (Date.now() - start) / 1000;
 		logger.info('Dashboard data deletion completed', {
-			dashboardId,
-			userId,
+			id,
+			uid,
 			modifiedCount: result.modifiedCount,
 			queuedFiles,
 			duration,
@@ -484,10 +457,9 @@ DashboardSchema.statics.deleteDashboardData = async function (
 		};
 	} catch (err) {
 		logger.error('Error deleting dashboard data', {
-			dashboardId,
-			userId,
+			id,
+			uid,
 			error: err.message,
-			stack: err.stack,
 		});
 		throw err;
 	}

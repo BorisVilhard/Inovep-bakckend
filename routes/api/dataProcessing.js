@@ -5,6 +5,7 @@ import {
 	createOrUpdateDashboard,
 	deleteDashboardData,
 	getDashboardData,
+	getAllDashboards,
 } from '../../controllers/dataProcessingController.js';
 
 // Logger configuration
@@ -23,19 +24,19 @@ const logger = winston.createLogger({
 
 const router = express.Router();
 
-// Configure Multer for in-memory file uploads (no local storage)
+// Configure Multer for in-memory file uploads
 const upload = multer({
-	storage: multer.memoryStorage(), // Store files in-memory as buffers
+	storage: multer.memoryStorage(),
 	limits: {
-		fileSize: 6 * 1024 * 1024, // 6MB limit to prevent oversized processed data
+		fileSize: 6 * 1024 * 1024, // 6MB total file limit
 		fieldSize: 1 * 1024 * 1024, // 1MB for form fields
 	},
 	fileFilter: (req, file, cb) => {
 		const allowedMimeTypes = [
 			'text/csv',
-			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-			'application/vnd.ms-excel', // .xls
-			'application/octet-stream', // Fallback for .xlsx
+			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+			'application/vnd.ms-excel',
+			'application/octet-stream',
 		];
 		const allowedExtensions = ['.csv', '.xlsx', '.xls'];
 		const extension =
@@ -79,7 +80,7 @@ const handleMulterError = (err, req, res, next) => {
 			userId: req.params.userId,
 		});
 		return res.status(400).json({
-			message:
+			msg:
 				err.message === 'File too large'
 					? 'File size exceeds 6MB limit'
 					: 'File upload error',
@@ -89,23 +90,20 @@ const handleMulterError = (err, req, res, next) => {
 			error: err.message,
 			userId: req.params.userId,
 		});
-		return res.status(400).json({ message: err.message });
+		return res.status(400).json({ msg: err.message });
 	}
 	next();
 };
 
-// Create or update dashboard with CSV or Excel file upload
+// Routes
 router.post(
 	'/users/:userId/dashboard/upload',
 	upload.single('file'),
 	handleMulterError,
 	createOrUpdateDashboard
 );
-
-// Retrieve dashboard data
 router.get('/users/:userId/dashboard/:dashboardId', getDashboardData);
-
-// Delete dashboard data
 router.delete('/users/:userId/dashboard/:dashboardId', deleteDashboardData);
+router.get('/users/:userId/dashboards', getAllDashboards);
 
 export default router;
