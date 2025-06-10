@@ -6,6 +6,8 @@ import {
 	deleteDashboardData,
 	getDashboardData,
 	getAllDashboards,
+	calculateDashboardParameters,
+	getNumericTitlesEndpoint,
 } from '../../controllers/dataProcessingController.js';
 
 // Logger configuration
@@ -32,6 +34,22 @@ const upload = multer({
 		fieldSize: 1 * 1024 * 1024, // 1MB for form fields
 	},
 	fileFilter: (req, file, cb) => {
+		const chunkIdx = parseInt(req.body.chunkIdx, 10);
+		const isChunked = !isNaN(chunkIdx) && req.body.totalChunks;
+
+		if (isChunked) {
+			// Skip MIME type and extension validation for all chunks
+			logger.info('Skipping file type validation for chunked upload', {
+				filename: file.originalname,
+				mimetype: file.mimetype,
+				chunkIdx,
+				fileSize: file.size,
+				userId: req.params.userId,
+			});
+			cb(null, true);
+			return;
+		}
+
 		const allowedMimeTypes = [
 			'text/csv',
 			'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -102,8 +120,24 @@ router.post(
 	handleMulterError,
 	createOrUpdateDashboard
 );
+router.post(
+	'/users/:userId/dashboard/:dashboardId/calculate',
+	calculateDashboardParameters
+);
 router.get('/users/:userId/dashboard/:dashboardId', getDashboardData);
 router.delete('/users/:userId/dashboard/:dashboardId', deleteDashboardData);
 router.get('/users/:userId/dashboards', getAllDashboards);
+// router.put(
+//   '/users/:userId/dashboard/:dashboardId/category/:categoryName',
+//   updateCategoryData
+// );
+// router.get(
+//   '/users/:userId/dashboard/:dashboardId/file/:fileId',
+//   downloadDashboardFile
+// );
+router.get(
+	'/users/:userId/dashboard/:dashboardId/numeric-titles',
+	getNumericTitlesEndpoint
+);
 
 export default router;

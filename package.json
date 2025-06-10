@@ -50,6 +50,7 @@
 		"nodemailer": "^6.9.16",
 		"openai": "^4.59.0",
 		"pako": "^2.1.0",
+		"papaparse": "^5.5.3",
 		"passport": "^0.7.0",
 		"passport-google-oauth20": "^2.0.0",
 		"pdf-parse": "^1.1.1",
@@ -68,6 +69,7 @@
 		"xlsx-stream-reader": "^1.1.1"
 	},
 	"devDependencies": {
+		"adm-zip": "^0.5.16",
 		"bull": "^4.16.5",
 		"nodemon": "^3.1.9"
 	}
