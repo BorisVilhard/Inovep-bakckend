@@ -952,6 +952,10 @@ export async function deleteDashboardData(req, res) {
  * GET /users/:userId/dashboards
  * Retrieves all dashboards for a user.
  */
+/**
+ * GET /users/:userId/dashboards
+ * Retrieves all dashboards for a user.
+ */
 export async function getAllDashboards(req, res) {
 	const authHeader = req.headers.authorization;
 	logger.debug('Received get all dashboards request', {
@@ -983,7 +987,7 @@ export async function getAllDashboards(req, res) {
 			});
 			return res.status(200).json({
 				msg: 'Dashboards retrieved',
-				dashboards: cachedData,
+				dashboards: cachedData.map((d) => ({ ...d, data: [] })), // Include empty data array
 				duration,
 			});
 		}
@@ -993,9 +997,16 @@ export async function getAllDashboards(req, res) {
 			{ name: 1, ref: 1, f: 1, uid: 1, ca: 1, ua: 1 }
 		).lean();
 
+		// Add empty data array to each dashboard
+		const dashboardsWithData = dashboards.map((d) => ({ ...d, data: [] }));
+
 		let cacheWarning = null;
 		try {
-			const cached = await setCachedDashboard(uid, cacheKey, dashboards);
+			const cached = await setCachedDashboard(
+				uid,
+				cacheKey,
+				dashboardsWithData
+			);
 			if (!cached) {
 				cacheWarning = 'Data too large to cache';
 			}
@@ -1013,7 +1024,7 @@ export async function getAllDashboards(req, res) {
 
 		res.status(200).json({
 			msg: 'Dashboards retrieved',
-			dashboards,
+			dashboards: dashboardsWithData,
 			duration,
 			cacheWarning,
 		});
