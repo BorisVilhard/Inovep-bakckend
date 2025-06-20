@@ -23,15 +23,12 @@ const logger = winston.createLogger({
 	],
 });
 
-// Redis configuration for Bull queue
-const REDIS_URL =
-	process.env.UPSTASH_REDIS_REST_URL || 'https://crack-vervet-30777.upstash.io';
-const REDIS_TOKEN =
-	process.env.UPSTASH_REDIS_REST_TOKEN || 'YOUR_UPSTASH_REDIS_TOKEN';
-
 // Background job queue for GridFS deletions
 const deletionQueue = new Queue('gridfs-deletion', {
-	redis: { url: REDIS_URL, password: REDIS_TOKEN },
+	redis: {
+		url: process.env.UPSTASH_REDIS_REST_URL,
+		token: process.env.UPSTASH_REDIS_REST_TOKEN,
+	},
 });
 
 // Schema for individual entries

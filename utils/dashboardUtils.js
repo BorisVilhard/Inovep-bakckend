@@ -26,11 +26,13 @@ export const mergeDashboardData = (existingData, newData) => {
 			existingType: typeof existingData,
 			newType: typeof newData,
 		});
-		return existingData && Array.isArray(existingData) ? [...existingData] : [];
+		return Array.isArray(existingData) ? [...existingData] : [];
 	}
 
 	const startTime = Date.now();
 	const categoryMap = new Map();
+
+	// Map existing categories
 	existingData.forEach((category, index) => {
 		const categoryName = category.cat || category.categoryName;
 		if (typeof categoryName !== 'string' || !categoryName.trim()) {
@@ -40,6 +42,7 @@ export const mergeDashboardData = (existingData, newData) => {
 		categoryMap.set(categoryName, { ...category, cat: categoryName });
 	});
 
+	// Merge new categories
 	newData.forEach((newCategory, index) => {
 		const categoryName = newCategory.cat || newCategory.categoryName;
 		if (typeof categoryName !== 'string' || !categoryName.trim()) {
@@ -54,6 +57,7 @@ export const mergeDashboardData = (existingData, newData) => {
 		if (categoryMap.has(categoryName)) {
 			const existingCategory = categoryMap.get(categoryName);
 
+			// Merge data entries
 			if (Array.isArray(newCategory.data)) {
 				const chartMap = new Map();
 				if (Array.isArray(existingCategory.data)) {
@@ -66,7 +70,12 @@ export const mergeDashboardData = (existingData, newData) => {
 					if (
 						typeof newEntry.i !== 'string' ||
 						!Array.isArray(newEntry.d) ||
-						!newEntry.d.every((node) => node.d instanceof Date)
+						!newEntry.d.every(
+							(node) =>
+								typeof node.t === 'string' &&
+								node.v !== undefined &&
+								node.d instanceof Date
+						)
 					) {
 						logger.debug('Skipping invalid chart', {
 							categoryName,
@@ -97,6 +106,7 @@ export const mergeDashboardData = (existingData, newData) => {
 				});
 			}
 
+			// Merge combined charts
 			if (Array.isArray(newCategory.comb) && newCategory.comb.length > 0) {
 				const combinedChartMap = new Map();
 				if (Array.isArray(existingCategory.comb)) {
@@ -132,11 +142,13 @@ export const mergeDashboardData = (existingData, newData) => {
 				});
 			}
 
+			// Merge summaries
 			if (Array.isArray(newCategory.sum) && newCategory.sum.length > 0) {
 				existingCategory.sum = existingCategory.sum || [];
 				existingCategory.sum.push(...newCategory.sum);
 			}
 
+			// Update chart and IDs
 			if (newCategory.chart && typeof newCategory.chart === 'string') {
 				existingCategory.chart = newCategory.chart;
 			}
@@ -176,26 +188,28 @@ export const mergeDashboardData = (existingData, newData) => {
 
 /**
  * Calculates a dynamic result from user-specified parameters and operations.
+ * Processes categories one by one to avoid memory issues with large datasets.
  * Removes used parameters and adds result to each category's data array.
  * @param {Array} dashboardData - Array of category objects.
- * @param {Array<string>} parameters - Array of parameter titles (e.g., ["Quantity", "Price"]).
- * @param {Array<string>} operations - Array of operations (e.g., ["multiply"]).
- * @param {string} resultName - Name for the result (e.g., "Total_Cost").
+ * @param {Array<string>} parameters - Array of parameter titles (e.g., ["DischargeDate", "AdmissionDate"]).
+ * @param {Array<string>} operations - Array of operations (e.g., ["minus"]).
+ * @param {string} resultName - Name for the result (e.g., "Days_spent").
+ * @param {string} calculationType - Type of calculation (default: 'numeric').
  * @returns {Array} Updated dashboard data with results added.
  */
 export function calculateDynamicParameters(
 	dashboardData,
 	parameters,
 	operations,
-	resultName
+	resultName,
+	calculationType = 'numeric'
 ) {
+	// Input validation
 	if (!Array.isArray(dashboardData)) {
 		logger.warn('Invalid dashboardData: must be an array', {
 			type: typeof dashboardData,
 		});
-		return dashboardData && Array.isArray(dashboardData)
-			? [...dashboardData]
-			: [];
+		return Array.isArray(dashboardData) ? [...dashboardData] : [];
 	}
 
 	if (!Array.isArray(parameters) || parameters.length < 2) {
@@ -221,16 +235,36 @@ export function calculateDynamicParameters(
 		return dashboardData;
 	}
 
-	const validOperations = ['plus', 'minus', 'multiply', 'divide'];
+	// Validate operations based on calculation type
+	const validOperations =
+		calculationType === 'numeric'
+			? ['plus', 'minus', 'multiply', 'divide']
+			: ['minus'];
 	if (!operations.every((op) => validOperations.includes(op))) {
-		logger.warn('Invalid operation: must be plus, minus, multiply, or divide', {
+		logger.warn(`Invalid operation: must be ${validOperations.join(', ')}`, {
 			operations,
+			calculationType,
 		});
 		return dashboardData;
 	}
 
+	if (
+		calculationType === 'date' &&
+		(parameters.length !== 2 || operations[0] !== 'minus')
+	) {
+		logger.warn(
+			'Date calculation requires exactly two parameters and minus operation',
+			{ parameters, operations }
+		);
+		return dashboardData;
+	}
+
 	const startTime = Date.now();
-	const updatedData = dashboardData.map((category, catIndex) => {
+	const updatedData = [];
+
+	// Process categories one by one
+	for (const [catIndex, category] of dashboardData.entries()) {
+		// Validate category structure
 		if (
 			!category ||
 			typeof category !== 'object' ||
@@ -240,21 +274,96 @@ export function calculateDynamicParameters(
 				cat: category?.cat,
 				catIndex,
 			});
-			return category;
+			updatedData.push(category);
+			continue;
 		}
 
+		// Find parameter entries
 		const paramData = parameters.map((param, paramIndex) => ({
 			param,
 			data: category.data.find((d) => d.d[0]?.t === param),
 			paramIndex,
 		}));
 
-		const values = paramData.map((pd) => pd.data?.d[0]?.v);
-		if (
-			!values.every((v) => typeof v === 'number' && v !== null && !isNaN(v))
-		) {
+		// Skip if any parameter is missing
+		if (!paramData.every((pd) => pd.data)) {
+			logger.debug('Skipping category: missing parameters', {
+				cat: category.cat,
+				parameters,
+				missing: parameters.filter(
+					(p) => !category.data.some((d) => d.d[0]?.t === p)
+				),
+			});
+			updatedData.push(category);
+			continue;
+		}
+
+		if (calculationType === 'date') {
+			// Handle date difference calculation
+			const [date1, date2] = paramData.map((pd) => pd.data.d[0]?.v);
+			let result = null;
+
+			// Convert values to Date objects if necessary
+			const d1 = date1 instanceof Date ? date1 : new Date(date1);
+			const d2 = date2 instanceof Date ? date2 : new Date(date2);
+
+			if (!isNaN(d1.getTime()) && !isNaN(d2.getTime())) {
+				// Calculate difference in days
+				result = (d1 - d2) / (1000 * 60 * 60 * 24);
+			}
+
+			if (result === null || !isFinite(result)) {
+				logger.debug('Date calculation failed: invalid dates', {
+					cat: category.cat,
+					parameters,
+					values: [date1, date2],
+				});
+				updatedData.push(category);
+				continue;
+			}
+
+			// Create new entry
+			const newData = category.data.filter(
+				(d) => !parameters.includes(d.d[0]?.t)
+			);
+			newData.push({
+				i: `${category.cat}-${resultName || 'date_diff'}`,
+				d: [
+					{
+						t: resultName || 'Date_Diff',
+						v: result,
+						d:
+							paramData[0]?.data?.d[0]?.d instanceof Date
+								? paramData[0].data.d[0].d
+								: new Date(paramData[0]?.data?.d[0]?.d || Date.now()),
+					},
+				],
+			});
+
+			logger.debug('Performed date calculation', {
+				cat: category.cat,
+				parameters,
+				result,
+			});
+
+			updatedData.push({
+				...category,
+				data: newData,
+			});
+			continue;
+		}
+
+		// Handle numeric calculation
+		const values = paramData.map((pd) => {
+			const value = pd.data?.d[0]?.v;
+			return typeof value === 'number' ? value : parseFloat(value) || 0;
+		});
+
+		// Validate numeric values
+		if (!values.every((v) => typeof v === 'number' && !isNaN(v))) {
+			// Handle string concatenation if all values are strings
 			if (values.every((v) => typeof v === 'string' && v)) {
-				const stringResult = values.join(':');
+				const result = values.join('');
 				const newData = category.data.filter(
 					(d) => !parameters.includes(d.d[0]?.t)
 				);
@@ -263,29 +372,38 @@ export function calculateDynamicParameters(
 					d: [
 						{
 							t: resultName || 'Combined_Result',
-							v: stringResult,
-							d: paramData[0]?.data?.d[0]?.d || new Date(),
+							v: result,
+							d:
+								paramData[0]?.data?.d[0]?.d instanceof Date
+									? paramData[0].data.d[0].d
+									: new Date(paramData[0]?.data?.d[0]?.d || Date.now()),
 						},
 					],
 				});
+
 				logger.debug('Performed string concatenation', {
 					cat: category.cat,
 					parameters,
-					result: stringResult,
+					result,
 				});
-				return {
+
+				updatedData.push({
 					...category,
 					data: newData,
-				};
+				});
+				continue;
 			}
+
 			logger.debug('Skipping calculation: non-numeric parameters', {
 				cat: category.cat,
 				parameters,
 				values,
 			});
-			return category;
+			updatedData.push(category);
+			continue;
 		}
 
+		// Perform numeric calculation
 		let result = values[0];
 		for (let i = 0; i < operations.length; i++) {
 			const op = operations[i];
@@ -303,6 +421,13 @@ export function calculateDynamicParameters(
 				case 'divide':
 					result = nextValue !== 0 ? result / nextValue : null;
 					break;
+				default:
+					logger.warn('Unknown operation', {
+						operation: op,
+						cat: category.cat,
+					});
+					updatedData.push(category);
+					continue;
 			}
 			if (result === null || !isFinite(result)) {
 				logger.debug('Calculation failed: invalid result', {
@@ -311,10 +436,12 @@ export function calculateDynamicParameters(
 					values,
 					result,
 				});
-				return category;
+				updatedData.push(category);
+				continue;
 			}
 		}
 
+		// Create new entry
 		const newData = category.data.filter(
 			(d) => !parameters.includes(d.d[0]?.t)
 		);
@@ -324,22 +451,33 @@ export function calculateDynamicParameters(
 				{
 					t: resultName || 'Calculated_Result',
 					v: result,
-					d: paramData[0]?.data?.d[0]?.d || new Date(),
+					d:
+						paramData[0]?.data?.d[0]?.d instanceof Date
+							? paramData[0].data.d[0].d
+							: new Date(paramData[0]?.data?.d[0]?.d || Date.now()),
 				},
 			],
 		});
 
-		return {
+		logger.debug('Performed numeric calculation', {
+			cat: category.cat,
+			parameters,
+			operation: operations[0],
+			result,
+		});
+
+		updatedData.push({
 			...category,
 			data: newData,
-		};
-	});
+		});
+	}
 
 	const duration = (Date.now() - startTime) / 1000;
 	logger.info('Calculated dynamic parameters', {
 		resultName,
 		parameters,
 		operations,
+		calculationType,
 		categories: updatedData.length,
 		duration,
 	});
@@ -368,8 +506,14 @@ export function limitDashboardDataSize(
 
 	const startTime = Date.now();
 	let sortedData = dashboardData;
-	if (priorityFn) {
-		sortedData = [...dashboardData].sort(priorityFn);
+	if (priorityFn && typeof priorityFn === 'function') {
+		try {
+			sortedData = [...dashboardData].sort(priorityFn);
+		} catch (e) {
+			logger.warn('Priority function failed, using unsorted data', {
+				error: e.message,
+			});
+		}
 	}
 
 	let totalSize = 0;
@@ -412,54 +556,63 @@ export function limitDashboardDataSize(
  * @returns {Array<string>} Array of numeric titles.
  */
 export function getNumericTitles(dashboardData) {
+	return dashboardData
+		.flatMap((category) => category.data.map((entry) => entry.d[0]?.t))
+		.filter(
+			(t, i, arr) =>
+				t &&
+				typeof dashboardData[0].data.find((e) => e.d[0]?.t === t)?.d[0]?.v ===
+					'number' &&
+				arr.indexOf(t) === i
+		);
+}
+
+/**
+ * Retrieves titles that are dates across all categories for dynamic parameter selection.
+ * @param {Array} dashboardData - Array of category objects.
+ * @returns {Array<string>} Array of date titles.
+ */
+export function getDateTitles(dashboardData) {
 	if (!Array.isArray(dashboardData) || dashboardData.length === 0) {
-		logger.warn('Invalid dashboardData: must be an array and non-empty', {
+		logger.warn('Invalid dashboardData for date titles', {
 			type: typeof dashboardData,
 			length: dashboardData?.length,
 		});
 		return [];
 	}
 
-	const startTime = Date.now();
 	const titleMap = new Map();
 	let entryCount = 0;
 
 	dashboardData.forEach((category, catIndex) => {
-		if (Array.isArray(category.data)) {
-			category.data.forEach((entry, entryIndex) => {
-				entryCount++;
-				const title = entry.d[0]?.t;
-				if (title) {
-					const isNumeric =
-						typeof entry.d[0]?.v === 'number' && !isNaN(entry.d[0]?.v);
-					if (!titleMap.has(title)) {
-						titleMap.set(title, { numeric: true, count: 0 });
-					}
-					const titleData = titleMap.get(title);
-					titleData.numeric = titleData.numeric && isNumeric;
-					titleData.count += 1;
-				} else {
-					logger.debug('Skipping entry with missing title', {
-						category: category.cat,
-						catIndex,
-						entryIndex,
-					});
+		if (!Array.isArray(category.data)) return;
+		category.data.forEach((entry, entryIndex) => {
+			entryCount++;
+			const title = entry.d[0]?.t;
+			if (title) {
+				const value = entry.d[0]?.v;
+				const isDate =
+					value instanceof Date ||
+					(typeof value === 'string' && /\d{4}-\d{2}-\d{2}T/.test(value));
+				if (!titleMap.has(title)) {
+					titleMap.set(title, { isDate: true, count: 0 });
 				}
-			});
-		}
+				const titleData = titleMap.get(title);
+				titleData.isDate = titleData.isDate && isDate;
+				titleData.count += 1;
+			}
+		});
 	});
 
-	const numericTitles = Array.from(titleMap.entries())
-		.filter(([_, data]) => data.numeric && data.count === dashboardData.length)
+	const dateTitles = Array.from(titleMap.entries())
+		.filter(([_, data]) => data.isDate && data.count >= dashboardData.length)
 		.map(([title]) => title);
 
-	const duration = (Date.now() - startTime) / 1000;
-	logger.info('Retrieved numeric titles', {
-		titles: numericTitles,
-		count: numericTitles.length,
+	logger.info('Retrieved date titles', {
+		titles: dateTitles,
+		count: dateTitles.length,
 		entryCount,
-		duration,
 	});
 
-	return numericTitles;
+	return dateTitles;
 }

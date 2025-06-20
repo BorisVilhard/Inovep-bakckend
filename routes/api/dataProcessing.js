@@ -8,6 +8,7 @@ import {
 	getAllDashboards,
 	calculateDashboardParameters,
 	getNumericTitlesEndpoint,
+	getDateTitlesEndpoint,
 } from '../../controllers/dataProcessingController.js';
 
 // Logger configuration
@@ -123,6 +124,10 @@ router.post(
 router.post(
 	'/users/:userId/dashboard/:dashboardId/calculate',
 	calculateDashboardParameters
+);
+router.get(
+	'/users/:userId/dashboard/:dashboardId/date-titles',
+	getDateTitlesEndpoint
 );
 router.get('/users/:userId/dashboard/:dashboardId', getDashboardData);
 router.delete('/users/:userId/dashboard/:dashboardId', deleteDashboardData);

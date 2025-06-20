@@ -17,6 +17,7 @@ import {
 	getNumericTitles,
 	mergeDashboardData,
 	limitDashboardDataSize,
+	getDateTitles,
 } from '../utils/dashboardUtils.js';
 import {
 	cleanNumeric,
@@ -40,22 +41,17 @@ const logger = winston.createLogger({
 	],
 });
 
-// Initialize GridFS
 let gfs;
 mongoose.connection.once('open', () => {
 	gfs = new GridFSBucket(mongoose.connection.db, { bucketName: 'Uploads' });
 	logger.info('GridFS initialized');
 });
 
-// Initialize Redis and Bull Queue
 const redis = Redis.fromEnv();
 const deletionQueue = new Queue('gridfs-deletion', {
 	redis: {
-		url:
-			process.env.UPSTASH_REDIS_REST_URL ||
-			'https://crack-vervet-30777.upstash.io',
-		password:
-			process.env.UPSTASH_REDIS_REST_TOKEN || 'YOUR_UPSTASH_REDIS_TOKEN',
+		url: process.env.UPSTASH_REDIS_REST_URL,
+		token: process.env.UPSTASH_REDIS_REST_TOKEN,
 	},
 });
 
@@ -339,7 +335,7 @@ export async function createOrUpdateDashboard(req, res) {
 		// Handle "blob" filename by using dashboardName or default
 		if (fileName === 'blob' || !fileName.match(/\.(csv|xlsx|xls)$/i)) {
 			const dashboardName = name || `upload-${Date.now()}`;
-			const inferredExtension = fileType === 'text/csv' ? '.csv' : '.xlsx';
+			const inferredExtension = fileType == 'numeric' ? '.csv' : '.xlsx';
 			fileName = `${dashboardName}${inferredExtension}`;
 			logger.warn('Corrected invalid filename', {
 				uid,
@@ -531,10 +527,36 @@ export async function createOrUpdateDashboard(req, res) {
 				.json({ msg: 'ERR_NO_DATA: No valid dashboard data extracted' });
 		}
 
+		// Convert date strings to Date objects
+		dashboardData = dashboardData.map((category) => ({
+			...category,
+			data: category.data.map((entry) => ({
+				...entry,
+				d: entry.d.map((node) => ({
+					...node,
+					d:
+						typeof node.d === 'string' && /\d{4}-\d{2}-\d{2}T/.test(node.d)
+							? new Date(node.d)
+							: node.d,
+				})),
+			})),
+		}));
+
+		// Apply summation of Weight_kg and Height_cm
+		const sumParameters = ['Weight_kg', 'Height_cm'];
+		const sumOperation = ['plus'];
+		const sumResultName = 'result';
+		dashboardData = calculateDynamicParameters(
+			dashboardData,
+			sumParameters,
+			sumOperation,
+			sumResultName
+		);
+
 		// Identify numeric parameters for validation
 		const numericParameters = getNumericTitles(dashboardData);
 
-		// Apply dynamic parameter calculation if provided
+		// Apply additional dynamic parameter calculation if provided
 		if (parameters && operations && resultName) {
 			if (!parameters.every((p) => numericParameters.includes(p))) {
 				logger.error('Selected parameters are not all numeric', {
@@ -765,116 +787,6 @@ export async function createOrUpdateDashboard(req, res) {
 }
 
 /**
- * GET /users/:userId/dashboard/:dashboardId
- * Retrieves a specific dashboard's data.
- */
-export async function getDashboardData(req, res) {
-	const authHeader = req.headers.authorization;
-	logger.debug('Received get dashboard request', {
-		userId: req.params.userId,
-		dashboardId: req.params.dashboardId,
-		authHeader: !!authHeader,
-	});
-	if (!validateAuth(authHeader)) {
-		logger.error('Unauthorized access attempt', { userId: req.params.userId });
-		return res.status(401).json({ msg: 'Unauthorized' });
-	}
-
-	const { userId: uid, dashboardId: id } = req.params;
-	const start = Date.now();
-
-	try {
-		if (
-			!mongoose.Types.ObjectId.isValid(uid) ||
-			!mongoose.Types.ObjectId.isValid(id)
-		) {
-			logger.error('Invalid uid or id', { uid, id });
-			return res.status(400).json({ msg: 'ERR_INVALID_ID: Invalid uid or id' });
-		}
-
-		const cacheKey = `dash:${uid}:${id}:data`;
-		const cachedData = await getCachedDashboard(uid, cacheKey);
-		if (cachedData) {
-			const dashboard = await Dashboard.findOne(
-				{ _id: id, uid },
-				{ name: 1, ref: 1, f: 1, uid: 1, ca: 1, ua: 1 }
-			).lean();
-			if (!dashboard) {
-				logger.warn('Dashboard not found', { uid, id });
-				return res
-					.status(404)
-					.json({ msg: 'ERR_NOT_FOUND: Dashboard not found' });
-			}
-			const numericParameters = getNumericTitles(cachedData);
-			const duration = (Date.now() - start) / 1000;
-			logger.info('Retrieved from cache', { uid, id, duration });
-			return res.status(200).json({
-				msg: 'Dashboard retrieved',
-				dashboard: { ...dashboard, data: cachedData },
-				numericParameters,
-				duration,
-			});
-		}
-
-		const dashboard = await Dashboard.findOne(
-			{ _id: id, uid },
-			{ name: 1, ref: 1, f: 1, uid: 1, ca: 1, ua: 1 }
-		).lean();
-		if (!dashboard) {
-			logger.warn('Dashboard not found', { uid, id });
-			return res
-				.status(404)
-				.json({ msg: 'ERR_NOT_FOUND: Dashboard not found' });
-		}
-
-		const dashboardData = await Promise.race([
-			Dashboard.prototype.getDashboardData.call(dashboard),
-			new Promise((_, reject) =>
-				setTimeout(() => reject(new Error('Database query timeout')), 5000)
-			),
-		]);
-		const numericParameters = getNumericTitles(dashboardData);
-		const dashboardObject = { ...dashboard, data: dashboardData };
-
-		let cacheWarning = null;
-		try {
-			const cached = await setCachedDashboard(uid, cacheKey, dashboardData);
-			if (!cached) {
-				cacheWarning = 'Data too large to cache';
-			}
-			await Dashboard.cacheDashboardMetadata(uid, id);
-		} catch (e) {
-			logger.warn('Failed to cache data', { uid, id, error: e.message });
-			cacheWarning = 'Cache failed';
-		}
-
-		const duration = (Date.now() - start) / 1000;
-		logger.info('Retrieved from DB', {
-			uid,
-			id,
-			categories: dashboardData.length,
-			duration,
-		});
-
-		res.status(200).json({
-			msg: 'Dashboard retrieved',
-			dashboard: dashboardObject,
-			numericParameters,
-			duration,
-			cacheWarning,
-		});
-	} catch (e) {
-		logger.error('Error in getDashboardData', {
-			uid,
-			id,
-			error: e.message,
-			stack: e.stack,
-		});
-		res.status(500).json({ msg: 'ERR_SERVER: Server error', error: e.message });
-	}
-}
-
-/**
  * DELETE /users/:userId/dashboard/:dashboardId
  * Deletes a dashboard and its associated data.
  */
@@ -952,10 +864,6 @@ export async function deleteDashboardData(req, res) {
  * GET /users/:userId/dashboards
  * Retrieves all dashboards for a user.
  */
-/**
- * GET /users/:userId/dashboards
- * Retrieves all dashboards for a user.
- */
 export async function getAllDashboards(req, res) {
 	const authHeader = req.headers.authorization;
 	logger.debug('Received get all dashboards request', {
@@ -987,7 +895,7 @@ export async function getAllDashboards(req, res) {
 			});
 			return res.status(200).json({
 				msg: 'Dashboards retrieved',
-				dashboards: cachedData.map((d) => ({ ...d, data: [] })), // Include empty data array
+				dashboards: cachedData.map((d) => ({ ...d, data: [] })),
 				duration,
 			});
 		}
@@ -1104,7 +1012,9 @@ export async function updateCategoryData(req, res) {
 		const maxSize = 8 * 1024 * 1024;
 		if (Buffer.byteLength(dashboardJson, 'utf8') > maxSize) {
 			logger.error('Data exceeds 8MB', { uid, id });
-			return res.status(400).json({ msg: 'ERR_SIZE_LIMIT: Data exceeds 8MB' });
+			return res
+				.status(400)
+				.json({ msg: 'ERR_SIZE_LIMIT: Data exceeds maxSize' });
 		}
 
 		const dataFileId = new mongoose.Types.ObjectId();
@@ -1247,10 +1157,245 @@ export async function downloadDashboardFile(req, res) {
 		res.status(500).json({ msg: 'ERR_SERVER: Server error', error: e.message });
 	}
 }
+/**
+ * GET /users/:userId/dashboard/:dashboardId
+ * Retrieves dashboard data from cache or database.
+ */
+export async function getDashboardData(req, res) {
+	const authHeader = req.headers.authorization;
+	logger.debug('Received get dashboard request', {
+		userId: req.params.userId,
+		dashboardId: req.params.dashboardId,
+		authHeader: !!authHeader,
+	});
+	if (!validateAuth(authHeader)) {
+		logger.error('Unauthorized access attempt', { userId: req.params.userId });
+		return res.status(401).json({ msg: 'Unauthorized' });
+	}
+
+	const { userId: uid, dashboardId: id } = req.params;
+	const start = Date.now();
+
+	try {
+		if (
+			!mongoose.Types.ObjectId.isValid(uid) ||
+			!mongoose.Types.ObjectId.isValid(id)
+		) {
+			logger.error('Invalid uid or id', { uid, id });
+			return res.status(400).json({ msg: 'ERR_INVALID_ID: Invalid uid or id' });
+		}
+
+		const cacheKey = `dash:${uid}:${id}:data`;
+		let cachedData = null;
+		try {
+			const cacheRaw = await getCachedDashboard(uid, cacheKey);
+			if (cacheRaw && Array.isArray(cacheRaw)) {
+				cachedData = cacheRaw;
+				logger.debug('Cache hit', {
+					uid,
+					id,
+					dataSample: JSON.stringify(cachedData.slice(0, 1)),
+				});
+			} else if (cacheRaw) {
+				logger.warn('Invalid cache data, clearing cache', { uid, id });
+				await deleteCachedDashboard(uid, cacheKey);
+			}
+		} catch (cacheError) {
+			logger.warn('Failed to retrieve cache, falling back to database', {
+				uid,
+				id,
+				error: cacheError.message,
+			});
+		}
+
+		if (cachedData) {
+			const dashboard = await Dashboard.findOne(
+				{ _id: id, uid },
+				{ name: 1, ref: 1, f: 1, uid: 1, ca: 1, ua: 1 }
+			).lean();
+			if (!dashboard) {
+				logger.warn('Dashboard not found', { uid, id });
+				return res
+					.status(404)
+					.json({ msg: 'ERR_NOT_FOUND: Dashboard not found' });
+			}
+			const numericParameters = getNumericTitles(cachedData);
+			const dateParameters = getDateTitles(cachedData);
+			const duration = (Date.now() - start) / 1000;
+			logger.info('Retrieved from cache', { uid, id, duration });
+			return res.status(200).json({
+				msg: 'Dashboard retrieved',
+				dashboard: { ...dashboard, data: cachedData },
+				numericParameters,
+				dateParameters,
+				duration,
+			});
+		}
+
+		const dashboard = await Dashboard.findOne(
+			{ _id: id, uid },
+			{ name: 1, ref: 1, f: 1, uid: 1, ca: 1, ua: 1 }
+		).lean();
+		if (!dashboard) {
+			logger.warn('Dashboard not found', { uid, id });
+			return res
+				.status(404)
+				.json({ msg: 'ERR_NOT_FOUND: Dashboard not found' });
+		}
+
+		const downloadStream = gfs.openDownloadStream(
+			new mongoose.Types.ObjectId(dashboard.ref.fid)
+		);
+		let data = Buffer.alloc(0);
+		downloadStream.on('data', (chunk) => {
+			data = Buffer.concat([data, chunk]);
+		});
+		await new Promise((resolve, reject) => {
+			downloadStream.on('end', resolve);
+			downloadStream.on('error', reject);
+		});
+
+		let dashboardData;
+		try {
+			let dataString;
+			// Check for gzip compression
+			if (data[0] === 0x1f && data[1] === 0x8b) {
+				logger.debug('Decompressing GridFS data', { uid, id });
+				try {
+					dataString = zlib.gunzipSync(data).toString('utf8');
+				} catch (decompressError) {
+					logger.error('Failed to decompress GridFS data', {
+						uid,
+						id,
+						error: decompressError.message,
+					});
+					throw new Error('Corrupted compressed data');
+				}
+			} else {
+				dataString = data.toString('utf8');
+			}
+
+			// Validate JSON format
+			if (!dataString.trim().startsWith('[')) {
+				throw new Error('Invalid JSON format: Data does not start with array');
+			}
+
+			dashboardData = JSON.parse(dataString, (key, value) => {
+				if (
+					key === 'd' &&
+					typeof value === 'string' &&
+					/\d{4}-\d{2}-\d{2}T/.test(value)
+				) {
+					return new Date(value);
+				}
+				if (key === 'v' && typeof value === 'string' && !isNaN(Number(value))) {
+					return Number(value); // Convert numeric strings to numbers
+				}
+				return value;
+			});
+
+			// Validate data structure
+			if (!Array.isArray(dashboardData)) {
+				throw new Error('Invalid data structure: Not an array');
+			}
+			dashboardData.forEach((category, index) => {
+				if (typeof category.cat !== 'string' || !Array.isArray(category.data)) {
+					throw new Error(`Invalid category at index ${index}`);
+				}
+				category.data.forEach((entry, entryIndex) => {
+					if (
+						typeof entry.i !== 'string' ||
+						!Array.isArray(entry.d) ||
+						!entry.d.every(
+							(node) =>
+								typeof node.t === 'string' &&
+								node.v !== undefined &&
+								node.d instanceof Date
+						)
+					) {
+						throw new Error(
+							`Invalid entry at category ${index}, entry ${entryIndex}`
+						);
+					}
+				});
+			});
+		} catch (parseError) {
+			logger.error('Failed to parse GridFS data', {
+				uid,
+				id,
+				error: parseError.message,
+				dataSample: data.slice(0, 50).toString('hex'),
+			});
+			try {
+				await deleteCachedDashboard(uid, cacheKey);
+				logger.info('Cleared corrupted cache', { uid, key: cacheKey });
+			} catch (clearError) {
+				logger.warn('Failed to clear cache', {
+					uid,
+					id,
+					error: clearError.message,
+				});
+			}
+			return res.status(500).json({
+				msg: 'ERR_SERVER: Invalid or corrupted dashboard data',
+				error: parseError.message,
+			});
+		}
+
+		let cacheWarning = null;
+		try {
+			const cached = await setCachedDashboard(uid, cacheKey, dashboardData);
+			if (!cached) {
+				cacheWarning = 'Data too large to cache';
+			}
+			await Dashboard.cacheDashboardMetadata(uid, id);
+		} catch (cacheError) {
+			logger.warn('Failed to cache data', {
+				uid,
+				id,
+				error: cacheError.message,
+			});
+			cacheWarning = 'Cache failed';
+		}
+
+		const numericParameters = getNumericTitles(dashboardData);
+		const dateParameters = getDateTitles(dashboardData);
+		const dashboardObject = { ...dashboard, data: dashboardData };
+
+		const duration = (Date.now() - start) / 1000;
+		logger.info('Retrieved from DB', {
+			uid,
+			id,
+			categories: dashboardData.length,
+			duration,
+		});
+
+		res.status(200).json({
+			msg: 'Dashboard retrieved',
+			dashboard: dashboardObject,
+			numericParameters,
+			dateParameters,
+			duration,
+			cacheWarning,
+		});
+	} catch (e) {
+		logger.error('Error in getDashboardData', {
+			uid,
+			id,
+			error: e.message,
+			stack: e.stack,
+		});
+		res.status(500).json({ msg: 'ERR_SERVER: Server error', error: e.message });
+	}
+}
 
 /**
- * POST /users/:userId/dashboard/:dashboardId/calculate
- * Applies dynamic parameter calculations to an existing dashboard.
+ * Calculates a dynamic result from user-specified parameters and operations.
+ * Removes used parameters and adds result to each category's data array.
+ * Handles numeric calculations, date differences, and string concatenation.
+ * Ensures `d` fields are Date objects to pass validation.
+ * @param {Object} req - Express request object.
+ * @param {Object} res - Express response object.
  */
 export async function calculateDashboardParameters(req, res) {
 	const authHeader = req.headers.authorization;
@@ -1261,6 +1406,7 @@ export async function calculateDashboardParameters(req, res) {
 		parameters: req.body.parameters,
 		operations: req.body.operations,
 		resultName: req.body.resultName,
+		calculationType: req.body.calculationType,
 	});
 	if (!validateAuth(authHeader)) {
 		logger.error('Unauthorized access attempt', { userId: req.params.userId });
@@ -1268,10 +1414,16 @@ export async function calculateDashboardParameters(req, res) {
 	}
 
 	const { userId: uid, dashboardId: id } = req.params;
-	const { parameters, operations, resultName } = req.body;
+	const {
+		parameters,
+		operations,
+		resultName,
+		calculationType = 'numeric',
+	} = req.body;
 	const start = Date.now();
 
 	try {
+		// Validate IDs
 		if (
 			!mongoose.Types.ObjectId.isValid(uid) ||
 			!mongoose.Types.ObjectId.isValid(id)
@@ -1294,16 +1446,21 @@ export async function calculateDashboardParameters(req, res) {
 
 		if (
 			!Array.isArray(operations) ||
-			operations.length !== parameters.length - 1
+			(calculationType === 'numeric' &&
+				operations.length !== parameters.length - 1) ||
+			(calculationType === 'date' &&
+				(parameters.length !== 2 || operations[0] !== 'minus'))
 		) {
-			logger.error('Invalid operations: must be one less than parameters', {
+			logger.error('Invalid operations', {
 				uid,
 				id,
 				operations,
-				expected: parameters.length - 1,
+				calculationType,
+				expected:
+					calculationType === 'numeric' ? parameters.length - 1 : 'minus',
 			});
 			return res.status(400).json({
-				msg: 'ERR_INVALID_INPUT: Number of operations must be one less than parameters',
+				msg: 'ERR_INVALID_INPUT: Invalid operations for calculation type',
 			});
 		}
 
@@ -1318,11 +1475,21 @@ export async function calculateDashboardParameters(req, res) {
 			});
 		}
 
-		const validOperations = ['plus', 'minus', 'multiply', 'divide'];
+		const validOperations =
+			calculationType === 'numeric'
+				? ['plus', 'minus', 'multiply', 'divide']
+				: ['minus'];
 		if (!operations.every((op) => validOperations.includes(op))) {
-			logger.error('Invalid operation', { uid, id, operations });
+			logger.error('Invalid operation', {
+				uid,
+				id,
+				operations,
+				calculationType,
+			});
 			return res.status(400).json({
-				msg: 'ERR_INVALID_OPERATION: Operations must be plus, minus, multiply, or divide',
+				msg: `ERR_INVALID_OPERATION: Operations must be ${validOperations.join(
+					', '
+				)}`,
 			});
 		}
 
@@ -1347,7 +1514,10 @@ export async function calculateDashboardParameters(req, res) {
 			uid,
 			id,
 			categoryCount: dashboardData.length,
+			sample: JSON.stringify(dashboardData.slice(0, 1)),
 		});
+
+		// Validate dashboardData
 		if (!Array.isArray(dashboardData) || dashboardData.length === 0) {
 			logger.error('No valid dashboard data', { uid, id });
 			return res
@@ -1355,24 +1525,103 @@ export async function calculateDashboardParameters(req, res) {
 				.json({ msg: 'ERR_NO_DATA: No valid dashboard data available' });
 		}
 
-		// Validate parameters are numeric
-		const numericParameters = getNumericTitles(dashboardData);
-		logger.debug('Numeric parameters identified', {
+		// Convert d fields to Date objects and v fields to numbers where applicable
+		dashboardData = dashboardData.map((category) => ({
+			...category,
+			data: Array.isArray(category.data)
+				? category.data.map((entry) => ({
+						...entry,
+						d: Array.isArray(entry.d)
+							? entry.d.map((node) => {
+									const dValue = node.d;
+									const vValue = node.v;
+									const dType = typeof dValue;
+									const vType = typeof vValue;
+									const isDate = dValue instanceof Date;
+									const isValidString =
+										typeof dValue === 'string' &&
+										/\d{4}-\d{2}-\d{2}T/.test(dValue);
+									const isNumericString =
+										typeof vValue === 'string' && !isNaN(Number(vValue));
+									logger.debug('Field analysis', {
+										uid,
+										id,
+										cat: category.cat,
+										entry: entry.i,
+										dValue,
+										dType,
+										vValue,
+										vType,
+										isDate,
+										isValidString,
+										isNumericString,
+									});
+									return {
+										...node,
+										d: isDate
+											? dValue
+											: isValidString
+											? new Date(dValue)
+											: new Date(),
+										v: isNumericString ? Number(vValue) : vValue,
+									};
+							  })
+							: [],
+				  }))
+				: [],
+		}));
+
+		// Validate initial dashboardData structure
+		const isValidInitialStructure = dashboardData.every(
+			(category) =>
+				typeof category.cat === 'string' &&
+				Array.isArray(category.data) &&
+				category.data.every(
+					(entry) =>
+						typeof entry.i === 'string' &&
+						Array.isArray(entry.d) &&
+						entry.d.every(
+							(node) =>
+								typeof node.t === 'string' &&
+								node.v !== undefined &&
+								node.d instanceof Date
+						)
+				)
+		);
+		if (!isValidInitialStructure) {
+			logger.error('Invalid initial dashboard data structure', {
+				uid,
+				id,
+				sample: JSON.stringify(dashboardData.slice(0, 1)),
+			});
+			return res.status(400).json({
+				msg: 'ERR_INVALID_STRUCTURE: Invalid initial dashboard data structure',
+			});
+		}
+
+		// Validate parameters based on calculation type
+		const validTitles =
+			calculationType === 'numeric'
+				? getNumericTitles(dashboardData)
+				: getDateTitles(dashboardData);
+		logger.debug('Valid titles identified', {
 			uid,
 			id,
-			numericParameters,
+			validTitles,
 			requestedParameters: parameters,
+			calculationType,
 		});
-		if (!parameters.every((p) => numericParameters.includes(p))) {
-			logger.error('Selected parameters are not all numeric', {
+		if (!parameters.every((p) => validTitles.includes(p))) {
+			logger.error('Selected parameters are not valid', {
 				uid,
 				id,
 				parameters,
-				numericParameters,
+				validTitles,
+				calculationType,
 			});
-			return res
-				.status(400)
-				.json({ msg: 'ERR_INVALID_PARAM: Parameters must be numeric' });
+			return res.status(400).json({
+				msg: `ERR_INVALID_PARAM: Parameters must be ${calculationType} fields`,
+			});
 		}
 
 		// Apply dynamic parameter calculation
@@ -1380,10 +1629,11 @@ export async function calculateDashboardParameters(req, res) {
 			dashboardData,
 			parameters,
 			operations,
-			resultName
+			resultName,
+			calculationType
 		);
 
-		// Validate updated data
+		// Validate updated data structure
 		const maxSize = 8 * 1024 * 1024;
 		const limitedData = limitDashboardDataSize(dashboardData, maxSize);
 		const isValid = limitedData.every(
@@ -1406,7 +1656,7 @@ export async function calculateDashboardParameters(req, res) {
 			logger.error('Invalid dashboard data structure after calculation', {
 				uid,
 				id,
-				limitedDataSample: JSON.stringify(limitedData.slice(0, 1)),
+				sample: JSON.stringify(limitedData.slice(0, 1)),
 			});
 			return res.status(400).json({
 				msg: 'ERR_INVALID_STRUCTURE: Invalid dashboard data structure after calculation',
@@ -1430,10 +1680,18 @@ export async function calculateDashboardParameters(req, res) {
 
 		// Update dashboard reference
 		if (dashboard.ref?.fid) {
-			await deletionQueue.add(
-				{ fileIds: [dashboard.ref.fid] },
-				{ attempts: 3 }
-			);
+			try {
+				await deletionQueue.add(
+					{ fileIds: [dashboard.ref.fid] },
+					{ attempts: 3 }
+				);
+			} catch (queueError) {
+				logger.warn('Failed to add deletion job to queue', {
+					uid,
+					id,
+					error: queueError.message,
+				});
+			}
 		}
 		dashboard.ref = {
 			fid: fileId.toString(),
@@ -1454,8 +1712,12 @@ export async function calculateDashboardParameters(req, res) {
 				cacheWarning = 'Data too large to cache';
 			}
 			await Dashboard.cacheDashboardMetadata(uid, id);
-		} catch (e) {
-			logger.warn('Failed to cache data', { uid, id, error: e.message });
+		} catch (cacheError) {
+			logger.warn('Failed to cache data', {
+				uid,
+				id,
+				error: cacheError.message,
+			});
 			cacheWarning = 'Cache failed due to error';
 		}
 
@@ -1466,6 +1728,7 @@ export async function calculateDashboardParameters(req, res) {
 			resultName,
 			parameters,
 			operations,
+			calculationType,
 			duration,
 		});
 
@@ -1482,6 +1745,7 @@ export async function calculateDashboardParameters(req, res) {
 				data: limitedData,
 			},
 			numericParameters: getNumericTitles(limitedData),
+			dateParameters: getDateTitles(limitedData),
 			duration,
 			cacheWarning,
 		});
@@ -1556,6 +1820,7 @@ export async function getNumericTitlesEndpoint(req, res) {
 			id,
 			titleCount: numericTitles.length,
 			duration,
+			titles: numericTitles,
 		});
 
 		return res.status(200).json({
@@ -1565,6 +1830,86 @@ export async function getNumericTitlesEndpoint(req, res) {
 		});
 	} catch (e) {
 		logger.error('Error in getNumericTitlesEndpoint', {
+			uid,
+			id,
+			error: e.message,
+			stack: e.stack,
+		});
+		return res
+			.status(500)
+			.json({ msg: 'ERR_SERVER: Server error', error: e.message });
+	}
+}
+
+/**
+ * GET /users/:userId/dashboard/:dashboardId/date-titles
+ * Retrieves date titles for a specific dashboard.
+ */
+export async function getDateTitlesEndpoint(req, res) {
+	const authHeader = req.headers.authorization;
+	logger.debug('Received request for date titles', {
+		userId: req.params.userId,
+		dashboardId: req.params.dashboardId,
+		authHeader: !!authHeader,
+	});
+
+	if (!validateAuth(authHeader)) {
+		logger.error('Unauthorized access attempt', { userId: req.params.userId });
+		return res.status(401).json({ msg: 'Unauthorized' });
+	}
+
+	const { userId: uid, dashboardId: id } = req.params;
+	const start = Date.now();
+
+	try {
+		if (
+			!mongoose.Types.ObjectId.isValid(uid) ||
+			!mongoose.Types.ObjectId.isValid(id)
+		) {
+			logger.error('Invalid uid or id', { uid, id });
+			return res.status(400).json({ msg: 'ERR_INVALID_ID: Invalid uid or id' });
+		}
+
+		logger.debug('Querying dashboard', { uid, id });
+		const dashboard = await Dashboard.findOne({ _id: id, uid }).lean();
+		if (!dashboard) {
+			logger.warn('Dashboard not found', { uid, id });
+			return res
+				.status(404)
+				.json({ msg: 'ERR_NOT_FOUND: Dashboard not found' });
+		}
+
+		logger.debug('Fetching dashboard data', { uid, id });
+		const dashboardData = await Promise.race([
+			Dashboard.prototype.getDashboardData.call(dashboard),
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error('Database query timeout')), 5000)
+			),
+		]);
+		logger.debug('Dashboard data retrieved', {
+			uid,
+			id,
+			categoryCount: dashboardData.length,
+		});
+
+		logger.debug('Calculating date titles', { uid, id });
+		const dateTitles = getDateTitles(dashboardData);
+
+		const duration = (Date.now() - start) / 1000;
+		logger.info('Retrieved date titles', {
+			uid,
+			id,
+			titleCount: dateTitles.length,
+			duration,
+		});
+
+		return res.status(200).json({
+			msg: 'Date titles retrieved',
+			dateTitles,
+			duration,
+		});
+	} catch (e) {
+		logger.error('Error in getDateTitlesEndpoint', {
 			uid,
 			id,
 			error: e.message,
